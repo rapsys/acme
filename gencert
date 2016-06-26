@@ -1,0 +1,48 @@
+#! /usr/bin/perl
+
+# Best practice
+use strict;
+use warnings;
+
+# Load acme
+use acme;
+
+# Load POSIX
+use POSIX qw(EXIT_SUCCESS EXIT_FAILURE);
+
+#XXX: debug
+use Data::Dumper;
+
+# Show usage
+if (scalar(@ARGV) < 2) {
+	print "Usage: $0 user\@example.com www.example.com [example.com] [...]\n";
+	exit EXIT_FAILURE;
+}
+
+# Create new object
+my $acme = acme->new(shift @ARGV, @ARGV);
+
+# Prepare environement
+$acme->prepare();
+
+# Generate required keys
+$acme->genKeys();
+
+# Generate csr
+$acme->genCsr();
+
+# Directory
+$acme->directory();
+
+# Register
+$acme->register();
+
+# Authorize
+$acme->authorize();
+
+# Issue
+$acme->issue();
+
+# Exit with success
+exit EXIT_SUCCESS;
+
