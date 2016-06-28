@@ -27,9 +27,8 @@ use POSIX qw(EXIT_FAILURE);
 use Data::Dumper;
 
 # Documentation links
-#XXX: see https://letsencrypt.github.io/acme-spec/
-#XXX: see http://www.rfc-editor.org/rfc/rfc7517.txt
-#XXX: see ietf draft at https://ietf-wg-acme.github.io/acme/
+#XXX: see https://letsencrypt.github.io/acme-spec/ (probably based on https://ietf-wg-acme.github.io/acme/)
+#XXX: see jwk rfc http://www.rfc-editor.org/rfc/rfc7517.txt
 #XXX: see javascript implementation https://github.com/diafygi/gethttpsforfree/blob/gh-pages/js/index.js
 
 # Set constants
