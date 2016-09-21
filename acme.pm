@@ -11,9 +11,12 @@ our @ISA = qw(Exporter);
 
 # Load dependancies
 use Carp qw(carp confess);
+use Date::Parse qw(str2time);
+use DateTime;
 use Digest::SHA qw(sha256_base64);
 use Email::Valid;
 use File::Path qw(make_path);
+use File::Slurp qw(read_file write_file);
 use File::Temp; # qw( :seekable );
 use IPC::System::Simple qw(capturex);
 use JSON qw(encode_json decode_json);
@@ -37,6 +40,7 @@ use constant {
 
 	CERT_DIR => 'cert',
 	KEY_DIR => 'key',
+	PENDING_DIR => 'pending',
 
 	ACCOUNT_KEY => 'account.pem',
 	ACCOUNT_PUB => 'account.pub',
@@ -147,8 +151,10 @@ sub new {
 
 # Prepare environement
 sub prepare {
+	my ($self) = @_;
+
 	# Create all paths
-	make_path(CERT_DIR, KEY_DIR, {error => \my $err});
+	make_path(CERT_DIR, KEY_DIR, PENDING_DIR.'/'.$self->{mail}, {error => \my $err});
 	if (@$err) {
 		map {
 			my ($file, $msg) = %$_;
@@ -386,33 +392,58 @@ sub authorize {
 
 	# Create request for each domain
 	map {
-		# Post new-authz request
-		my $res = $self->_post($self->{'new-authz'}, {resource => 'new-authz', identifier => {type => 'dns', value => $_}, existing => 'accept'});
+		# Init content
+		my $content = undef;
 
-		# Handle error
-		unless ($res->is_success) {
-			confess 'POST '.$self->{'new-authz'}.' for '.$_.' failed: '.$res->status_line;
-		}
+		# Init file
+		my $file = PENDING_DIR.'/'.$self->{mail}.'/'.$_;
 
-		# Decode content
-		my $content = decode_json($res->content);
+		# Load in content domain data or post a new authz request
+		#TODO: add check on cache file ???
+		if (
+			#XXX: use eval to workaround a fatal in decode_json
+			! defined eval {
+				# Check that file exists
+				-f $file &&
+				# Read it
+				($content = read_file($file)) &&
+				# Decode it
+				($content = decode_json($content)) &&
+				# Check expiration
+				(DateTime->from_epoch(epoch => str2time($content->{expires})) >= DateTime->now()->add(hours => 1))
+			}
+		) {
+			# Post new-authz request
+			my $res = $self->_post($self->{'new-authz'}, {resource => 'new-authz', identifier => {type => 'dns', value => $_}, existing => 'accept'});
 
-		# Check domain
-		unless (defined $content->{identifier}{value} && $content->{identifier}{value} eq $_) {
-			confess 'domain matching '.$content->{identifier}{value}.' for '.$_.' failed: '.$res->status_line;
-		}
+			# Handle error
+			unless ($res->is_success) {
+				confess 'POST '.$self->{'new-authz'}.' for '.$_.' failed: '.$res->status_line;
+			}
 
-		# Check status
-		unless ($content->{status} eq 'valid' or $content->{status} eq 'pending') {
-			confess 'POST '.$self->{'new-authz'}.' for '.$_.' failed: '.$res->status_line;
+			# Decode content
+			$content = decode_json($res->content);
+
+			# Check domain
+			unless (defined $content->{identifier}{value} && $content->{identifier}{value} eq $_) {
+				confess 'domain matching '.$content->{identifier}{value}.' for '.$_.' failed: '.$res->status_line;
+			}
+
+			# Check status
+			unless ($content->{status} eq 'valid' or $content->{status} eq 'pending') {
+				confess 'POST '.$self->{'new-authz'}.' for '.$_.' failed: '.$res->status_line;
+			}
+
+			# Write to file
+			write_file($file, encode_json($content));
 		}
 
 		# Add challenge
 		%{$self->{challenges}{$_}} = (
 			status => undef,
 			expires => undef,
-			#dns_uri => undef,
-			#dns_token => undef,
+			dns_uri => undef,
+			dns_token => undef,
 			http_uri => undef,
 			http_token => undef,
 			http_challenge => undef
@@ -423,14 +454,17 @@ sub authorize {
 
 		# Save pending data
 		if ($content->{status} eq 'pending') {
+			#XXX: debug
+			print Dumper($content);
+
 			# Exctract validation data
 			foreach my $challenge (@{$content->{challenges}}) {
 				if ($challenge->{type} eq 'http-01') {
 					$self->{challenges}{$_}{http_uri} = $challenge->{uri};
 					$self->{challenges}{$_}{http_token} = $challenge->{token};
-				#} elsif ($challenge->{type} eq 'dns-01') {
-				#	$self->{challenges}{$_}{dns_uri} = $challenge->{uri};
-				#	$self->{challenges}{$_}{dns_token} = $challenge->{token};
+				} elsif ($challenge->{type} eq 'dns-01') {
+					$self->{challenges}{$_}{dns_uri} = $challenge->{uri};
+					$self->{challenges}{$_}{dns_token} = $challenge->{token};
 				}
 			}
 
@@ -439,40 +473,43 @@ sub authorize {
 			#$self->_dnsCheck('_acme-challenge.'.$_.'.', $self->{challenges}{$_}{http_token}.'.'.$self->{account}{thumbprint});
 
 			# Check http challenge
-			if ($self->_httpCheck(
-				# Well known uri
-				'http://'.$_.'/.well-known/acme-challenge/'.$self->{challenges}{$_}{http_token},
-				# token.thumbprint
-				$self->{challenges}{$_}{http_token}.'.'.$self->{account}{thumbprint}
-			)) {
-				# Post challenge request
-				my $res = $self->_post($self->{challenges}{$_}{http_uri}, {resource => 'challenge', keyAuthorization => $self->{challenges}{$_}{http_token}.'.'.$self->{account}{thumbprint}});
-
-				# Handle error
-				unless ($res->is_success) {
-					confess 'POST '.$self->{challenges}{$_}{http_uri}.' failed: '.$res->status_line;
-				}
-
-				# Extract content
-				my $content = decode_json($res->content);
-
-				# Save status
-				$self->{challenges}{$_}{status} = $content->{status};
-
-				# Add challenge uri to poll
-				#XXX: in case it is still pending
-				if ($content->{status} eq 'pending') {
-					$self->{challenges}{$_}{http_challenge} = $content->{uri};
-				}
-			} else {
-				# Set failed status
-				$self->{challenges}{$_}{status} = 'invalid';
-
-				# Display challenge to fix
-				print STDERR 'Makes http://'.$_.'/.well-known/acme-challenge/'.$self->{challenges}{$_}{http_token}.' return '.$self->{challenges}{$_}{http_token}.'.'.$self->{account}{thumbprint}."\n";
-			}
+#			if ($self->_httpCheck(
+#				# Well known uri
+#				'http://'.$_.'/.well-known/acme-challenge/'.$self->{challenges}{$_}{http_token},
+#				# token.thumbprint
+#				$self->{challenges}{$_}{http_token}.'.'.$self->{account}{thumbprint}
+#			)) {
+#				# Post challenge request
+#				my $res = $self->_post($self->{challenges}{$_}{http_uri}, {resource => 'challenge', keyAuthorization => $self->{challenges}{$_}{http_token}.'.'.$self->{account}{thumbprint}});
+#
+#				# Handle error
+#				unless ($res->is_success) {
+#					confess 'POST '.$self->{challenges}{$_}{http_uri}.' failed: '.$res->status_line;
+#				}
+#
+#				# Extract content
+#				my $content = decode_json($res->content);
+#
+#				# Save status
+#				$self->{challenges}{$_}{status} = $content->{status};
+#
+#				# Add challenge uri to poll
+#				#XXX: in case it is still pending
+#				if ($content->{status} eq 'pending') {
+#					$self->{challenges}{$_}{http_challenge} = $content->{uri};
+#				}
+#			} else {
+#				# Set failed status
+#				$self->{challenges}{$_}{status} = 'invalid';
+#
+#				# Display challenge to fix
+#				print STDERR 'Makes http://'.$_.'/.well-known/acme-challenge/'.$self->{challenges}{$_}{http_token}.' return '.$self->{challenges}{$_}{http_token}.'.'.$self->{account}{thumbprint}."\n";
+#			}
 		}
 	} @{$self->{domains}};
+
+	#XXX: debug
+	exit EXIT_FAILURE;
 
 	# Poll pending
 	while (scalar map { $_->{status} eq 'pending' ? 1 : (); } values %{$self->{challenges}}) {
