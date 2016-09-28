@@ -10,9 +10,6 @@ use acme;
 # Load POSIX
 use POSIX qw(EXIT_SUCCESS EXIT_FAILURE);
 
-#XXX: debug
-use Data::Dumper;
-
 # Init prod
 my $prod = 0;
 

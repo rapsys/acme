@@ -26,9 +26,6 @@ use Net::Domain::TLD;
 use Tie::IxHash;
 use POSIX qw(EXIT_FAILURE);
 
-# Debug
-use Data::Dumper;
-
 # Documentation links
 #XXX: see https://letsencrypt.github.io/acme-spec/ (probably based on https://ietf-wg-acme.github.io/acme/)
 #XXX: see jwk rfc http://www.rfc-editor.org/rfc/rfc7517.txt
@@ -73,7 +70,7 @@ use constant {
 	ACME_TERMS => 'https://letsencrypt.org/documents/LE-SA-v1.0.1-July-27-2015.pdf',
 
 	# Version
-	VERSION => 'v0.2'
+	VERSION => 'v0.3'
 };
 
 # User agent object
@@ -620,7 +617,6 @@ sub issue {
 
 	# Handle error
 	unless ($res->is_success) {
-		print Dumper($res);
 		confess 'POST '.$self->{'new-cert'}.' failed: '.$res->status_line;
 	}
 
