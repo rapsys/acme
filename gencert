@@ -13,6 +13,12 @@ use POSIX qw(EXIT_SUCCESS EXIT_FAILURE);
 #XXX: debug
 use Data::Dumper;
 
+# Init prod
+my $prod = 0;
+
+# Strip and enable prod
+@ARGV = map { if ($_ eq '-p') { $prod = 1; (); } else { $_; } } @ARGV;
+
 # Show usage
 if (scalar(@ARGV) < 2) {
 	print "Usage: $0 user\@example.com www.example.com [example.com] [...]\n";
@@ -23,7 +29,7 @@ if (scalar(@ARGV) < 2) {
 my $acme = acme->new(shift @ARGV, @ARGV);
 
 # Prepare environement
-$acme->prepare();
+$acme->prepare($prod);
 
 # Generate required keys
 $acme->genKeys();
@@ -32,13 +38,13 @@ $acme->genKeys();
 $acme->genCsr();
 
 # Directory
-$acme->directory();
+$acme->directory($prod);
 
 # Register
 $acme->register();
 
 # Authorize
-$acme->authorize();
+$acme->authorize($prod);
 
 # Issue
 $acme->issue();
