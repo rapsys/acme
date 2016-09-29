@@ -1,0 +1,91 @@
+#! /usr/bin/php
+<?php
+
+# Verify filename
+if (count($argv) != 2) {
+	echo 'Usage: genconfig /etc/acmepl/config'."\n";
+	exit(1);
+}
+
+# Directory do not exists
+if (!is_dir(dirname($argv[1]))) {
+	echo 'Directory '.dirname($argv[1]).' do not exists'."\n";
+	exit(1);
+}
+
+# Directory do not exists
+if (file_exists($argv[1]) && !in_array(filetype($argv[1]), array('file','link'))) {
+	echo 'File '.$argv[1].' exists and is not a file'."\n";
+	exit(1);
+}
+
+# Symlink target do not exists
+if (is_link($argv[1]) && !file_exists($argv[1])) {
+	# Read final link
+	$target = $argv[1];
+	# Extract last link
+	do {
+		# Update to next link
+		$target = readlink($target);
+	} while (is_link($target));
+	echo 'Symlink '.$argv[1].' target '.$target.' do not exists'."\n";
+	exit(1);
+}
+
+# Not writable
+if (
+	(is_file($argv[1]) && !is_writable($argv[1])) ||
+	(!file_exists($argv[1]) && !is_writable(dirname($argv[1])))
+) {
+	echo 'Unable to open '.$argv[1].' for writing'."\n";
+	exit(1);
+}
+
+// Generate config
+$config = json_encode(
+	// Root array
+	array(
+		// Certificate object
+		array(
+			// Public cert
+			//XXX: required
+			'cert' => '/etc/pki/tls/certs/httpd.pem',
+			// Private key
+			//XXX: required
+			'key' => '/etc/pki/tls/private/httpd.pem',
+			// Mail address
+			//XXX: required
+			'mail' => 'example@example.com',
+			// Domain list
+			//XXX: required
+			'domains' => array(
+				'www.example.com',
+				'example.com'
+			),
+			// Production certificate
+			//XXX: optional
+			//XXX: set to 1 for production
+			'prod' => 0
+		),
+		// Other certificate
+		array(
+			'cert' => '/etc/ssl/certs/apache.crt',
+			'key' => '/etc/ssl/private/apache.key',
+			'mail' => 'example@example.com',
+			'domains' => array(
+				'other.example.com',
+				'example.com'
+			),
+			'prod' => 0
+		),
+		#...
+	)
+);
+
+# Send to stdout
+if ($argv[1] == '-') {
+	echo $config;
+# Save to file
+} else {
+	file_put_contents($argv[1], $config);
+}
