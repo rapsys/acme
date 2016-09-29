@@ -10,8 +10,14 @@ use acme;
 # Load POSIX
 use POSIX qw(EXIT_SUCCESS EXIT_FAILURE);
 
+# Init debug
+my $debug = 0;
+
 # Init prod
 my $prod = 0;
+
+# Strip and enable debug
+@ARGV = map { if ($_ eq '-d') { $debug = 1; (); } else { $_; } } @ARGV;
 
 # Strip and enable prod
 @ARGV = map { if ($_ eq '-p') { $prod = 1; (); } else { $_; } } @ARGV;
@@ -23,10 +29,10 @@ if (scalar(@ARGV) < 2) {
 }
 
 # Create new object
-my $acme = acme->new(shift @ARGV, @ARGV);
+my $acme = acme->new(shift @ARGV, $debug, $prod, @ARGV);
 
 # Prepare environement
-$acme->prepare($prod);
+$acme->prepare();
 
 # Generate required keys
 $acme->genKeys();
@@ -35,13 +41,13 @@ $acme->genKeys();
 $acme->genCsr();
 
 # Directory
-$acme->directory($prod);
+$acme->directory();
 
 # Register
 $acme->register();
 
 # Authorize
-$acme->authorize($prod);
+$acme->authorize();
 
 # Issue
 $acme->issue();
