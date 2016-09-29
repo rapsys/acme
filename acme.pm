@@ -76,9 +76,6 @@ use constant {
 # User agent object
 our $ua;
 
-# Debug
-our $_debug = 0;
-
 # Strerr backup
 our $_stderr;
 
@@ -107,7 +104,7 @@ tie(%{$jwk{jwk}{jwk}}, 'Tie::IxHash', e => undef, kty => uc(KEY_TYPE), n => unde
 # Constructor
 sub new {
 	# Extract params
-	my ($class, $mail, @domains) = @_;
+	my ($class, $mail, $debug, $prod, @domains) = @_;
 
 	# Create self hash
 	my $self = {};
@@ -115,13 +112,19 @@ sub new {
 	# Link self to package
 	bless($self, $class);
 
+	# Save debug
+	$self->{debug} = $debug;
+
+	# Save prod
+	$self->{prod} = $prod;
+
 	# Add extra check to mail validity
 	#XXX: mxcheck fail if there is only a A record on the domain
 	my $ev = Email::Valid->new(-fqdn => 1, -tldcheck => 1, -mxcheck => 1);
 
 	# Show error if check fail
 	if (! defined $ev->address($mail)) {
-		map { carp 'failed check: '.$_ if ($_debug) } $ev->details();
+		map { carp 'failed check: '.$_ if ($self->{debug}) } $ev->details();
 		confess 'Email::Valid->address failed';
 	}
 
@@ -165,14 +168,14 @@ sub new {
 
 # Prepare environement
 sub prepare {
-	my ($self, $prod) = @_;
+	my ($self) = @_;
 
 	# Create all paths
-	make_path(CERT_DIR, KEY_DIR, PENDING_DIR.'/'.$self->{mail}.'.'.($prod ? 'prod' : 'staging'), {error => \my $err});
+	make_path(CERT_DIR, KEY_DIR, PENDING_DIR.'/'.$self->{mail}.'.'.($self->{prod} ? 'prod' : 'staging'), {error => \my $err});
 	if (@$err) {
 		map {
 			my ($file, $msg) = %$_;
-			carp ($file eq '' ? '' : $file.': ').$msg if ($_debug);
+			carp ($file eq '' ? '' : $file.': ').$msg if ($self->{debug});
 		} @$err;
 		confess 'make_path failed';
 	}
@@ -269,13 +272,13 @@ sub genCsr {
 
 # Directory call
 sub directory {
-	my ($self, $prod) = @_;
+	my ($self) = @_;
 
 	# Set time
 	my $time = time;
 
 	# Set directory
-	my $dir = $prod ? ACME_PROD_DIR : ACME_DIR;
+	my $dir = $self->{prod} ? ACME_PROD_DIR : ACME_DIR;
 
 	# Create a request
 	my $req = HTTP::Request->new(GET => $dir.'?'.$time);
@@ -356,11 +359,11 @@ sub _dnsCheck {
 
 	# Check if we get dns answer
 	unless(my $rep = $res->search($domain, 'TXT')) {
-		carp 'TXT record search for '.$domain.' failed' if ($_debug);
+		carp 'TXT record search for '.$domain.' failed' if ($self->{debug});
 		return;
 	} else {
 		unless (scalar map { $_->type eq 'TXT' && $_->txtdata =~ /^$signature$/ ? 1 : (); } $rep->answer) {
-			carp 'TXT record recursive search for '.$domain.' failed' if ($_debug);
+			carp 'TXT record recursive search for '.$domain.' failed' if ($self->{debug});
 			return;
 		}
 	}
@@ -380,13 +383,13 @@ sub _httpCheck {
 
 	# Handle error
 	unless ($res->is_success) {
-		carp 'GET http://'.$domain.'/.well-known/acme-challenge/'.$token.' failed: '.$res->status_line if ($_debug);
+		carp 'GET http://'.$domain.'/.well-known/acme-challenge/'.$token.' failed: '.$res->status_line if ($self->{debug});
 		return;
 	}
 
 	# Handle invalid content
 	unless($res->content =~ /^$token.$self->{account}{thumbprint}\s*$/) {
-		carp 'GET http://'.$domain.'/.well-known/acme-challenge/'.$token.' content match failed: /^'.$token.'.'.$self->{account}{thumbprint}.'\s*$/ !~ '.$res->content if ($_debug);
+		carp 'GET http://'.$domain.'/.well-known/acme-challenge/'.$token.' content match failed: /^'.$token.'.'.$self->{account}{thumbprint}.'\s*$/ !~ '.$res->content if ($self->{debug});
 		return;
 	}
 
@@ -426,7 +429,7 @@ sub register {
 
 # Authorize domains
 sub authorize {
-	my ($self, $prod) = @_;
+	my ($self) = @_;
 
 	# Create challenges hash
 	%{$self->{challenges}} = ();
@@ -440,7 +443,7 @@ sub authorize {
 		my $content = undef;
 
 		# Init file
-		my $file = PENDING_DIR.'/'.$self->{mail}.'.'.($prod ? 'prod' : 'staging').'/'.$_;
+		my $file = PENDING_DIR.'/'.$self->{mail}.'.'.($self->{prod} ? 'prod' : 'staging').'/'.$_;
 
 		# Load auth request content or post a new one
 		#TODO: add more check on cache file ???
@@ -562,7 +565,7 @@ sub authorize {
 
 				# Handle error
 				unless ($res->is_success) {
-					carp 'GET '.$self->{challenges}{$_}{http_challenge}.' failed: '.$res->status_line if ($_debug);
+					carp 'GET '.$self->{challenges}{$_}{http_challenge}.' failed: '.$res->status_line if ($self->{debug});
 				}
 
 				# Extract content
@@ -591,7 +594,7 @@ sub authorize {
 		#} map { $self->{challenges}{$_}{status} eq 'valid' ? $_ : () } keys %{$self->{challenges}};
 
 		# Stop here as a domain of csr list failed authorization
-		if ($_debug) {
+		if ($self->{debug}) {
 			confess 'Fix the challenges for domains: '.join(', ', map { ! defined $self->{challenges}{$_}{status} or $self->{challenges}{$_}{status} ne 'valid' ? $_ : (); } keys %{$self->{challenges}});
 		} else {
 			exit EXIT_FAILURE;
@@ -634,7 +637,7 @@ sub issue {
 
 	# Handle error
 	unless ($res->is_success) {
-		carp 'GET '.ACME_CERT.' failed: '.$res->status_line if ($_debug);
+		carp 'GET '.ACME_CERT.' failed: '.$res->status_line if ($self->{debug});
 	}
 
 	# Append content
@@ -644,7 +647,7 @@ sub issue {
 	close($fh) or die $!;
 
 	# Print success
-	carp 'Success, pem certificate in '.CERT_DIR.DS.SERVER_CRT if ($_debug);
+	carp 'Success, pem certificate in '.CERT_DIR.DS.SERVER_CRT if ($self->{debug});
 }
 
 1;
