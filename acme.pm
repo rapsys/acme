@@ -70,7 +70,10 @@ use constant {
 	ACME_TERMS => 'https://letsencrypt.org/documents/LE-SA-v1.0.1-July-27-2015.pdf',
 
 	# Version
-	VERSION => 'v0.3'
+	VERSION => 'v0.4',
+
+	# Config
+	CONFIG => '/etc/acmepl/config'
 };
 
 # User agent object
@@ -378,6 +381,25 @@ sub _httpCheck {
 	# Create a request
 	my $req = HTTP::Request->new(GET => 'http://'.$domain.'/.well-known/acme-challenge/'.$token);
 
+	# Load config if available
+	my $config = undef;
+	if (
+		#XXX: use eval to workaround a fatal in decode_json
+		defined eval {
+			# Check that file exists
+			-f CONFIG &&
+			# Read it
+			($config = read_file(CONFIG)) &&
+			# Decode it
+			($config = decode_json($config)) &&
+			# Check defined
+			$config->{thumbprint}
+		}
+	) {
+		# Try to write thumbprint
+		write_file($config->{thumbprint}, $self->{account}{thumbprint});
+	}
+
 	# Get request
 	my $res = $ua->request($req);
 
@@ -505,8 +527,8 @@ sub authorize {
 				} elsif ($challenge->{status} eq 'pending') {
 					# Handle check
 					if (
-						($challenge->{type} =~ /^http-[0-9]+$/ and $self->_httpCheck($_, $challenge->{token})) or
-						($challenge->{type} =~ /^dns-[0-9]+$/ and $self->_dnsCheck($_, $challenge->{token}))
+						($challenge->{type} =~ /^http-01$/ and $self->_httpCheck($_, $challenge->{token})) or
+						($challenge->{type} =~ /^dns-01$/ and $self->_dnsCheck($_, $challenge->{token}))
 					) {
 						# Post challenge request
 						my $res = $self->_post($challenge->{uri}, {resource => 'challenge', keyAuthorization => $challenge->{token}.'.'.$self->{account}{thumbprint}});
@@ -531,11 +553,18 @@ sub authorize {
 								poll => $content->{uri}
 							});
 						}
-					# Print http help
-					} elsif ($challenge->{type} =~ /^http-[0-9]+$/) {
+					}
+				}
+			}
+			# Check if check is challenge still in pending and no polls
+			if ($self->{challenges}{$_}{status} eq 'pending' && scalar @{$self->{challenges}{$_}{polls}} == 0) {
+				# Loop on all remaining challenges
+				foreach my $challenge (@{$content->{challenges}}) {
+					# Display help for http-01 check
+					if ($challenge->{type} eq 'http-01') {
 						print STDERR 'Create URI http://'.$_.'/.well-known/acme-challenge/'.$challenge->{token}.' with content '.$challenge->{token}.'.'.$self->{account}{thumbprint}."\n";
-					# Print dns help
-					} elsif ($challenge->{type} =~ /^dns-[0-9]+$/) {
+					# Display help for dns-01 check
+					} elsif ($challenge->{type} eq 'dns-01') {
 						print STDERR 'Create TXT record _acme-challenge.'.$_.'. with value '.(((sha256_base64($challenge->{token}.'.'.$self->{account}{thumbprint})) =~ s/=+\z//r) =~ tr[+/][-_]r)."\n";
 					}
 				}
@@ -579,6 +608,25 @@ sub authorize {
 		} map { $self->{challenges}{$_}{status} eq 'pending' ? $_ : (); } keys %{$self->{challenges}};
 	} 
 
+	# Load config if available
+	my $config = undef;
+	if (
+		#XXX: use eval to workaround a fatal in decode_json
+		defined eval {
+			# Check that file exists
+			-f CONFIG &&
+			# Read it
+			($config = read_file(CONFIG)) &&
+			# Decode it
+			($config = decode_json($config)) &&
+			# Check defined
+			$config->{thumbprint}
+		}
+	) {
+		# Try to write thumbprint
+		write_file($config->{thumbprint}, '');
+	}
+
 	# Stop here with remaining chanllenge
 	if (scalar map { ! defined $_->{status} or $_->{status} ne 'valid' ? 1 : (); } values %{$self->{challenges}}) {
 		# Deactivate all activated domains 
@@ -595,7 +643,8 @@ sub authorize {
 
 		# Stop here as a domain of csr list failed authorization
 		if ($self->{debug}) {
-			confess 'Fix the challenges for domains: '.join(', ', map { ! defined $self->{challenges}{$_}{status} or $self->{challenges}{$_}{status} ne 'valid' ? $_ : (); } keys %{$self->{challenges}});
+			my @domains = map { ! defined $self->{challenges}{$_}{status} or $self->{challenges}{$_}{status} ne 'valid' ? $_ : (); } keys %{$self->{challenges}};
+			confess 'Fix the challenge'.(scalar @domains > 1?'s':'').' for domain'.(scalar @domains > 1?'s':'').': '.join(', ', @domains);
 		} else {
 			exit EXIT_FAILURE;
 		}
