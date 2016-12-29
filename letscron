@@ -1,0 +1,145 @@
+#! /usr/bin/perl
+
+# Best practice
+use strict;
+use warnings;
+
+# Fix use of acl
+use filetest 'access';
+
+# Load dependancies
+use Carp qw(carp);
+use DateTime;
+use File::stat qw(stat);
+use File::Spec;
+use File::Slurp qw(read_file write_file);
+use JSON qw(decode_json);
+use IPC::System::Simple qw(capturex $EXITVAL);
+use acme qw(CERT_DIR CONFIG DS KEY_DIR SERVER_CRT SERVER_KEY);
+
+# Load POSIX
+use POSIX qw(strftime EXIT_SUCCESS EXIT_FAILURE);
+
+# Init debug
+my $debug = 0;
+
+# Init config
+my $config = undef;
+
+# Strip and enable debug
+@ARGV = map { if ($_ eq '-d') { $debug = 1; (); } else { $_; } } @ARGV;
+
+# Check config file
+if (! -f CONFIG) {
+	print 'Config file '.CONFIG.' do not exists'."\n";
+	exit EXIT_FAILURE;
+}
+
+# Load config
+unless (
+	#XXX: use eval to workaround a fatal in decode_json
+	eval {
+		# Read it
+		($config = read_file(CONFIG)) &&
+		# Decode it
+		($config = decode_json($config)) &&
+		# Check hash validity
+		defined($config->{certificates}) &&
+		# Check not empty
+		scalar($config->{certificates}) &&
+		# Check hash validity
+		defined($config->{thumbprint}) &&
+		# Check certificates array
+		! scalar map {unless(defined($_->{cert}) && defined($_->{key}) && defined($_->{mail}) && defined($_->{domain}) && defined($_->{domains})) {1;} else {();}} @{$config->{certificates}}
+	}
+) {
+	print 'Config file '.CONFIG.' is invalid'."\n";
+	exit EXIT_FAILURE;
+}
+
+# Deal with certificates
+foreach (@{$config->{certificates}}) {
+	# Init variables
+	my ($mtime, $dt, $suffix) = undef;
+
+	# Skip certificate without 60 days
+	if (-f $_->{cert} && ($mtime = stat($_->{cert})->mtime) >= (time() - 60*24*3600)) {
+		next;
+	}
+
+	# Extract cert directory and filename
+	my (undef, $certDir) = File::Spec->splitpath($_->{cert});
+
+	# Check that certificate is writable
+	unless (-w $certDir || -w $_->{cert}) {
+		carp('directory '.$certDir.' or file '.$_->{cert}.' must be writable: '.$!);
+		next;
+	}
+
+	# Unlink if is a symlink
+	if (-l KEY_DIR.DS.SERVER_KEY) {
+		unless(unlink(KEY_DIR.DS.SERVER_KEY)) {
+			carp('unlink '.KEY_DIR.DS.SERVER_KEY.' failed: '.$!);
+			next;
+		}
+	}
+
+	# Symlink to key
+	unless(symlink($_->{key}, KEY_DIR.DS.SERVER_KEY)) {
+		carp('symlink '.$_->{key}.' to '.KEY_DIR.DS.SERVER_KEY.' failed: '.$!);
+		next;
+	}
+
+	# Init args
+	my @args = @{$_->{domains}};
+
+	# Prepend mail and domain to other args
+	unshift(@args, $_->{mail}, $_->{domain});
+
+	# Preprend prod
+	if (defined $_->{prod} && $_->{prod}) {
+		unshift(@args, '-p');
+	}
+
+	# Preprend debug
+	if ($debug) {
+		unshift(@args, '-d');
+	}
+
+	# Run letscert with args
+	my @out = capturex([0..1], './letscert', @args);
+
+	# Deal with error
+	if ($EXITVAL != 0) {
+		print join("\n", @out) if ($debug);
+		carp('letscert '.join(', ', @args).' failed: '.$!);
+		next;
+	}
+
+	# Read cert
+	my $content;
+	unless($content = read_file(CERT_DIR.DS.SERVER_CRT)) {
+		carp('read_file '.CERT_DIR.DS.SERVER_CRT.' failed: '.$!);
+		next;
+	}
+
+	# Handle old certificate
+	if (-w $certDir && -f $_->{cert}) {
+		# Extract datetime suffix
+		$suffix = ($dt = DateTime->from_epoch(epoch => $mtime))->ymd('').$dt->hms('');
+
+		# Rename old certificate
+		unless(rename($_->{cert}, $_->{cert}.'.'.$suffix)) {
+			carp('rename '.$_->{cert}.' to '.$_->{cert}.'.'.$suffix.' failed: '.$!);
+			next;
+		}
+	}
+
+	# Save cert
+	unless(write_file($_->{cert}, $content)) {
+		carp('write_file '.$_->{cert}.' failed: '.$!);
+		next;
+	}
+}
+
+exit EXIT_SUCCESS;
