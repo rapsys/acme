@@ -8,11 +8,12 @@ use warnings;
 # Symbol export
 use Exporter;
 our @ISA = qw(Exporter);
+our @EXPORT_OK = qw(DS CERT_DIR KEY_DIR REQUEST_CSR ACCOUNT_KEY SERVER_KEY SERVER_CRT CONFIG);
 
 # Load dependancies
 use Carp qw(carp confess);
+use Data::Dumper;
 use Date::Parse qw(str2time);
-use DateTime;
 use Digest::SHA qw(sha256_base64);
 use Email::Valid;
 use File::Path qw(make_path);
@@ -23,8 +24,8 @@ use JSON qw(encode_json decode_json);
 use LWP;
 use MIME::Base64 qw(encode_base64url encode_base64);
 use Net::Domain::TLD;
-use Tie::IxHash;
 use POSIX qw(EXIT_FAILURE);
+use Tie::IxHash;
 
 # Documentation links
 #XXX: see https://letsencrypt.github.io/acme-spec/ (probably based on https://ietf-wg-acme.github.io/acme/)
@@ -477,10 +478,9 @@ sub authorize {
 				# Read it
 				($content = read_file($file)) &&
 				# Decode it
-				($content = decode_json($content)) &&
-				# Check expiration
-				(DateTime->from_epoch(epoch => str2time($content->{expires})) >= DateTime->now()->add(hours => 1))
-			}
+				($content = decode_json($content))
+			# Check expiration
+			} || (str2time($content->{expires}) <= time()+3600)
 		) {
 			# Post new-authz request
 			my $res = $self->_post($self->{'new-authz'}, {resource => 'new-authz', identifier => {type => 'dns', value => $_}, existing => 'accept'});
@@ -669,6 +669,7 @@ sub issue {
 
 	# Handle error
 	unless ($res->is_success) {
+		#print Dumper($res);
 		confess 'POST '.$self->{'new-cert'}.' failed: '.$res->status_line;
 	}
 
