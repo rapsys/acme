@@ -23,8 +23,9 @@ use warnings;
 use filetest 'access';
 
 # Load dependancies
-use Carp qw(carp);
+use Carp qw(carp confess);
 use DateTime;
+use File::Path qw(make_path);
 use File::stat qw(stat);
 use File::Spec;
 use File::Slurp qw(read_file write_file);
@@ -89,6 +90,19 @@ foreach (@{$config->{certificates}}) {
 	unless (-w $certDir || -w $_->{cert}) {
 		carp('directory '.$certDir.' or file '.$_->{cert}.' must be writable: '.$!);
 		next;
+	}
+
+	# Check that key directory exists
+	if (! -d KEY_DIR) {
+		# Create all paths
+		make_path(KEY_DIR, {error => \my $err});
+		if (@$err) {
+			map {
+				my ($file, $msg) = %$_;
+				carp ($file eq '' ? '' : $file.': ').$msg if ($debug);
+			} @$err;
+			confess 'make_path failed';
+		}
 	}
 
 	# Unlink if is a symlink
