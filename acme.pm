@@ -36,7 +36,7 @@ use File::Path qw(make_path);
 use File::Slurp qw(read_file write_file);
 use File::Temp; # qw( :seekable );
 use IPC::System::Simple qw(capturex);
-use JSON qw(encode_json decode_json);
+use JSON qw(from_json to_json);
 use LWP;
 use MIME::Base64 qw(encode_base64url encode_base64);
 use Net::Domain::TLD;
@@ -84,10 +84,10 @@ use constant {
 	ACME_CERT => 'https://letsencrypt.org/certs/lets-encrypt-x3-cross-signed.pem',
 	ACME_DIR => 'https://acme-staging.api.letsencrypt.org/directory',
 	ACME_PROD_DIR => 'https://acme-v01.api.letsencrypt.org/directory',
-	ACME_TERMS => 'https://letsencrypt.org/documents/LE-SA-v1.0.1-July-27-2015.pdf',
+	ACME_TERMS => 'https://letsencrypt.org/documents/LE-SA-v1.1.1-August-1-2016.pdf',
 
 	# Version
-	VERSION => 'v0.4',
+	VERSION => 'v0.6',
 
 	# Config
 	CONFIG => '/etc/acmepl/config'
@@ -263,7 +263,7 @@ sub genKeys {
 
 	# Store thumbprint
 	#XXX: convert base64 to base64 url
-	$self->{account}{thumbprint} = (sha256_base64(encode_json($self->{account}{jwk}{jwk})) =~ s/=+\z//r) =~ tr[+/][-_]r;
+	$self->{account}{thumbprint} = (sha256_base64(to_json($self->{account}{jwk}{jwk})) =~ s/=+\z//r) =~ tr[+/][-_]r;
 }
 
 # Generate certificate request
@@ -315,7 +315,7 @@ sub directory {
 	$self->{nonce} = $res->headers->{'replay-nonce'};
 
 	# Merge uris in self content
-	%$self = (%$self, %{decode_json($res->content)});
+	%$self = (%$self, %{from_json($res->content)});
 }
 
 # Post request
@@ -323,10 +323,10 @@ sub _post {
 	my ($self, $uri, $payload) = @_;
 
 	# Protected field
-	my $protected = encode_base64url(encode_json({nonce => $self->{nonce}}));
+	my $protected = encode_base64url(to_json({nonce => $self->{nonce}}));
 
 	# Payload field
-	$payload = encode_base64url(encode_json($payload));
+	$payload = encode_base64url(to_json($payload));
 
 	# Sign temp file
 	my $stf = File::Temp->new();
@@ -344,7 +344,7 @@ sub _post {
 	my $req = HTTP::Request->new(POST => $uri);
 	
 	# Set new-reg request content
-	$req->content(encode_json({
+	$req->content(to_json({
 		header => $self->{account}{jwk},
 		protected => $protected,
 		payload => $payload,
@@ -401,14 +401,14 @@ sub _httpCheck {
 	# Load config if available
 	my $config = undef;
 	if (
-		#XXX: use eval to workaround a fatal in decode_json
+		#XXX: use eval to workaround a fatal in from_json
 		defined eval {
 			# Check that file exists
 			-f CONFIG &&
 			# Read it
 			($config = read_file(CONFIG)) &&
 			# Decode it
-			($config = decode_json($config)) &&
+			($config = from_json($config)) &&
 			# Check defined
 			$config->{thumbprint}
 		}
@@ -487,14 +487,14 @@ sub authorize {
 		# Load auth request content or post a new one
 		#TODO: add more check on cache file ???
 		if (
-			#XXX: use eval to workaround a fatal in decode_json
+			#XXX: use eval to workaround a fatal in from_json
 			! defined eval {
 				# Check that file exists
 				-f $file &&
 				# Read it
 				($content = read_file($file)) &&
 				# Decode it
-				($content = decode_json($content))
+				($content = from_json($content))
 			# Check expiration
 			} || (str2time($content->{expires}) <= time()+3600)
 		) {
@@ -507,7 +507,7 @@ sub authorize {
 			}
 
 			# Decode content
-			$content = decode_json($res->content);
+			$content = from_json($res->content);
 
 			# Check domain
 			unless (defined $content->{identifier}{value} && $content->{identifier}{value} eq $_) {
@@ -520,7 +520,7 @@ sub authorize {
 			}
 
 			# Write to file
-			write_file($file, encode_json($content));
+			write_file($file, to_json($content));
 		}
 
 		# Add challenge
@@ -555,7 +555,7 @@ sub authorize {
 						}
 
 						# Extract content
-						my $content = decode_json($res->content);
+						my $content = from_json($res->content);
 
 						# Save if valid
 						if ($content->{status} eq 'valid') {
@@ -614,7 +614,7 @@ sub authorize {
 				}
 
 				# Extract content
-				my $content = decode_json($res->content);
+				my $content = from_json($res->content);
 
 				# Save status
 				if ($content->{status} ne 'pending') {
@@ -627,14 +627,14 @@ sub authorize {
 	# Load config if available
 	my $config = undef;
 	if (
-		#XXX: use eval to workaround a fatal in decode_json
+		#XXX: use eval to workaround a fatal in from_json
 		defined eval {
 			# Check that file exists
 			-f CONFIG &&
 			# Read it
 			($config = read_file(CONFIG)) &&
 			# Decode it
-			($config = decode_json($config)) &&
+			($config = from_json($config)) &&
 			# Check defined
 			$config->{thumbprint}
 		}
