@@ -1,102 +1,143 @@
-#! /usr/bin/php
-<?php
+#! /usr/bin/perl
 
-# Verify filename
-if (count($argv) != 2) {
-	echo 'Usage: genconfig /etc/acmepl/config'."\n";
-	exit(1);
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# Copyright (C) 2016 - 2017 Raphaël Gertz <acmepl@rapsys.eu>
+
+# Best practice
+use strict;
+use warnings;
+
+# Load required modules
+use JSON;
+use Tie::IxHash;
+
+# Load POSIX
+use POSIX qw(EXIT_SUCCESS EXIT_FAILURE);
+
+# XXX: Debug
+use Data::Dumper;
+
+# Init redhat
+my @redhat = ();
+
+# Init debian
+my @debian = ();
+
+# Init root
+my %root = ();
+tie(%root, 'Tie::IxHash', thumbprint => '/etc/acmepl/thumbprint', certificates => []);
+
+# Init prod
+my $prod = 0;
+
+# Strip and enable prod
+@ARGV = map { if ($_ eq '-p') { $prod = 1; (); } else { $_; } } @ARGV;
+
+# Strip and enable debug
+for (my $i = 0; $i <= $#ARGV; $i++) {
+	# Match redhat types
+	if ($ARGV[$i] =~ /^(?:(\-d|\-\-redhat)(?:=([^-][a-zA-Z0-9_\.,-]+))?)$/) {
+		if (defined($2)) {
+			push(@redhat, split(',', $2));
+		# Extract next parameter
+		} elsif(defined($ARGV[$i+1]) && $ARGV[$i+1] =~ /^([^-][a-zA-Z0-9_\.,-]+)$/) {
+			push(@redhat, split(',', $1));
+			$i++;
+		# Set default
+		} else {
+			push(@redhat, ('example.com'));
+		}
+	# Match debian types
+	} elsif ($ARGV[$i] =~ /^(?:(\-r|\-\-debian)(?:=([^-][a-zA-Z0-9_\.,-]+))?)$/) {
+		if (defined($2)) {
+			push(@debian, split(',', $2));
+		# Extract next parameter
+		} elsif(defined($ARGV[$i+1]) && $ARGV[$i+1] =~ /^([^-][a-zA-Z0-9_\.,-]+)$/) {
+			push(@debian, split(',', $1));
+			$i++;
+		# Set default
+		} else {
+			push(@debian, ('example.com'));
+		}
+	}
 }
 
-# Directory do not exists
-if (!is_dir(dirname($argv[1]))) {
-	echo 'Directory '.dirname($argv[1]).' do not exists'."\n";
-	exit(1);
+# Show usage
+if (scalar(@ARGV) < 1) {
+	print "Usage: $0 [(-d|--debian)[=example.com[,...]] [(-r|--redhat)[=example.com[,...]]] [...]\n";
+	exit EXIT_FAILURE;
 }
 
-# Directory do not exists
-if (file_exists($argv[1]) && !in_array(filetype($argv[1]), array('file','link'))) {
-	echo 'File '.$argv[1].' exists and is not a file'."\n";
-	exit(1);
+# Append redhat style examples
+foreach my $key (@redhat) {
+	tie(%{$root{certificates}[$#{$root{certificates}}+1]}, 'Tie::IxHash', (
+		# Public cert
+		#XXX: required
+		cert => '/etc/pki/tls/certs/'.$key.'.pem',
+		# Private key
+		#XXX: required
+		key => '/etc/pki/tls/private/'.$key.'.pem',
+		# Mail address
+		#XXX: required
+		mail => 'webmaster@'.$key,
+		# Root domain
+		#XXX: required
+		domain => 'www.'.$key,
+		# Domain list
+		#XXX: required
+		domains => [
+			$key,
+			'...'
+		],
+		# Production certificate
+		#XXX: optional
+		#XXX: set to 1 for production
+		prod => $prod
+	));
 }
 
-# Symlink target do not exists
-if (is_link($argv[1]) && !file_exists($argv[1])) {
-	# Read final link
-	$target = $argv[1];
-	# Extract last link
-	do {
-		# Update to next link
-		$target = readlink($target);
-	} while (is_link($target));
-	echo 'Symlink '.$argv[1].' target '.$target.' do not exists'."\n";
-	exit(1);
+# Append debian style examples
+foreach my $key (@debian) {
+	tie(%{$root{certificates}[$#{$root{certificates}}+1]}, 'Tie::IxHash', (
+		# Public cert
+		#XXX: required
+		cert => '/etc/ssl/certs/'.$key.'.crt',
+		# Private key
+		#XXX: required
+		key => '/etc/ssl/private/'.$key.'.key',
+		# Mail address
+		#XXX: required
+		mail => 'webmaster@'.$key,
+		# Root domain
+		#XXX: required
+		domain => 'www.'.$key,
+		# Domain list
+		#XXX: required
+		domains => [
+			$key,
+			'...'
+		],
+		# Production certificate
+		#XXX: optional
+		#XXX: set to 1 for production
+		prod => $prod
+	));
 }
 
-# Not writable
-if (
-	(is_file($argv[1]) && !is_writable($argv[1])) ||
-	(!file_exists($argv[1]) && !is_writable(dirname($argv[1])))
-) {
-	echo 'Unable to open '.$argv[1].' for writing'."\n";
-	exit(1);
-}
+# Display configuration template
+print to_json(\%root, {pretty => 1});
 
-// Generate config
-$config = json_encode(
-	// Root array
-	array(
-		//Thumbprint file
-		'thumbprint' => '/etc/acmepl/thumbprint',
-		//Certificate array
-		'certificates' => array(
-			// Certificate object
-			array(
-				// Public cert
-				//XXX: required
-				'cert' => '/etc/pki/tls/certs/httpd.pem',
-				// Private key
-				//XXX: required
-				'key' => '/etc/pki/tls/private/httpd.pem',
-				// Mail address
-				//XXX: required
-				'mail' => 'webmaster@example.com',
-				// Root domain
-				//XXX: required
-				'domain' => 'www.example.com',
-				// Domain list
-				//XXX: required
-				'domains' => array(
-					'example.com',
-					#...
-				),
-				// Production certificate
-				//XXX: optional
-				//XXX: set to 1 for production
-				'prod' => 0
-			),
-			// Other certificate
-			array(
-				'cert' => '/etc/ssl/certs/apache.crt',
-				'key' => '/etc/ssl/private/apache.key',
-				'mail' => 'postmaster@example.com',
-				'domain' => 'mail.example.com',
-				'domains' => array(
-					'imap.example.com',
-					'smtp.example.com'
-				),
-				'prod' => 0
-			),
-			#...
-		)
-	),
-	// Product a nice result
-	JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES
-);
-
-# Send to stdout
-if ($argv[1] == '-') {
-	echo $config;
-# Save to file
-} else {
-	file_put_contents($argv[1], $config);
-}
+# Exit with success
+exit EXIT_SUCCESS;
