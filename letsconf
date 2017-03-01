@@ -48,7 +48,7 @@ my $prod = 0;
 # Strip and enable debug
 for (my $i = 0; $i <= $#ARGV; $i++) {
 	# Match redhat types
-	if ($ARGV[$i] =~ /^(?:(\-d|\-\-redhat)(?:=([^-][a-zA-Z0-9_\.,-]+))?)$/) {
+	if ($ARGV[$i] =~ /^(?:(\-r|\-\-redhat)(?:=([^-][a-zA-Z0-9_\.,-]+))?)$/) {
 		if (defined($2)) {
 			push(@redhat, split(',', $2));
 		# Extract next parameter
@@ -60,7 +60,7 @@ for (my $i = 0; $i <= $#ARGV; $i++) {
 			push(@redhat, ('example.com'));
 		}
 	# Match debian types
-	} elsif ($ARGV[$i] =~ /^(?:(\-r|\-\-debian)(?:=([^-][a-zA-Z0-9_\.,-]+))?)$/) {
+	} elsif ($ARGV[$i] =~ /^(?:(\-d|\-\-debian)(?:=([^-][a-zA-Z0-9_\.,-]+))?)$/) {
 		if (defined($2)) {
 			push(@debian, split(',', $2));
 		# Extract next parameter
