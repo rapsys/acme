@@ -76,7 +76,7 @@ for (my $i = 0; $i <= $#ARGV; $i++) {
 
 # Show usage
 if (scalar(@ARGV) < 1) {
-	print "Usage: $0 [(-d|--debian)[=example.com[,...]] [(-r|--redhat)[=example.com[,...]]] [...]\n";
+	print "Usage: $0 [(-d|--debian)[=example.com[,...]] [(-r|--redhat)[=example.com[,...]]] [...] > /etc/acmepl/config\n";
 	exit EXIT_FAILURE;
 }
 
