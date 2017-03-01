@@ -1,3 +1,20 @@
+# This file is part of Acmepl
+#
+# Acmepl is is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# Copyright (C) 2016 - 2017 Raphaël Gertz <acmepl@rapsys.eu>
+
 # acme package
 package acme;
 
@@ -12,7 +29,6 @@ our @EXPORT_OK = qw(DS CERT_DIR KEY_DIR REQUEST_CSR ACCOUNT_KEY SERVER_KEY SERVE
 
 # Load dependancies
 use Carp qw(carp confess);
-use Data::Dumper;
 use Date::Parse qw(str2time);
 use Digest::SHA qw(sha256_base64);
 use Email::Valid;
@@ -636,7 +652,6 @@ sub authorize {
 		#	my $res = $self->_post($self->{challenges}{$_}{http_uri}, {resource => 'authz', status => 'deactivated'});
 		#	# Handle error
 		#	unless ($res->is_success) {
-		#		print Dumper($res);
 		#		confess 'POST '.$self->{challenges}{$_}{http_uri}.' failed: '.$res->status_line;
 		#	}
 		#} map { $self->{challenges}{$_}{status} eq 'valid' ? $_ : () } keys %{$self->{challenges}};
@@ -669,7 +684,6 @@ sub issue {
 
 	# Handle error
 	unless ($res->is_success) {
-		#print Dumper($res);
 		confess 'POST '.$self->{'new-cert'}.' failed: '.$res->status_line;
 	}
 
