@@ -1,0 +1,17 @@
+.\" Manpage for acmecron.
+.\" Contact acme@rapsys.eu to correct errors or typos.
+.TH man 1 "05 Apr 2017" "0.7" "acmecron man page"
+.SH NAME
+acmecron \- generate all certificate listed in configuration file if required
+.SH SYNOPSIS
+acmecron [-d]
+.SH DESCRIPTION
+acmecron is a basic script generating all certificate listed in configuration if not present or older than 60 days. It will run acmecert with right options for every listed certificate if required.
+.SH OPTIONS
+The acmeconf takes one option for enabling debug mode.
+.SH SEE ALSO
+acmeconf(1),acmecert(1)
+.SH BUGS
+No known bugs.
+.SH AUTHOR
+Raphaël Gertz (rapsys) <acme@rapsys.eu>

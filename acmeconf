@@ -13,7 +13,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-# Copyright (C) 2016 - 2017 Raphaël Gertz <acmepl@rapsys.eu>
+# Copyright (C) 2016 - 2017 Raphaël Gertz <acme@rapsys.eu>
 
 # Best practice
 use strict;
@@ -25,9 +25,6 @@ use Tie::IxHash;
 
 # Load POSIX
 use POSIX qw(EXIT_SUCCESS EXIT_FAILURE);
-
-# XXX: Debug
-use Data::Dumper;
 
 # Init redhat
 my @redhat = ();
@@ -91,6 +88,9 @@ for my $key (@redhat) {
 		# Private key
 		#XXX: required
 		key => '/etc/pki/tls/private/'.$domain.'.pem',
+		# Private account key
+		#XXX: required
+		account => '/etc/acme/account.pem',
 		# Mail address
 		#XXX: required
 		mail => 'webmaster@'.$domain,
@@ -118,6 +118,9 @@ for my $key (@debian) {
 		# Private key
 		#XXX: required
 		key => '/etc/ssl/private/'.$domain.'.key',
+		# Private account key
+		#XXX: required
+		account => '/etc/acme/account.pem',
 		# Mail address
 		#XXX: required
 		mail => 'webmaster@'.$domain,
