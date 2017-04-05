@@ -87,7 +87,7 @@ use constant {
 	ACME_TERMS => 'https://letsencrypt.org/documents/LE-SA-v1.1.1-August-1-2016.pdf',
 
 	# Version
-	VERSION => 'v0.6',
+	VERSION => 'v0.7',
 
 	# Config
 	CONFIG => '/etc/acmepl/config'
