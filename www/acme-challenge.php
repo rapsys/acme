@@ -1,6 +1,6 @@
 <?php
 //Config file to read
-$conf = '/etc/acmepl/config';
+$conf = '/etc/acme/config';
 
 //Unable to show key.thumbprint couple
 if (
