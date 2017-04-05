@@ -34,7 +34,7 @@ my @debian = ();
 
 # Init root
 my %root = ();
-tie(%root, 'Tie::IxHash', thumbprint => '/etc/acmepl/thumbprint', certificates => []);
+tie(%root, 'Tie::IxHash', thumbprint => '/etc/acme/thumbprint', certificates => []);
 
 # Init prod
 my $prod = 0;
@@ -73,7 +73,7 @@ for (my $i = 0; $i <= $#ARGV; $i++) {
 
 # Show usage
 if (scalar(@ARGV) < 1) {
-	print "Usage: $0 [(-d|--debian)[=example.com[,...]] [(-r|--redhat)[=example.com[,...]]] [...] > /etc/acmepl/config\n";
+	print "Usage: $0 [(-d|--debian)[=example.com[,...]] [(-r|--redhat)[=example.com[,...]]] [...] > /etc/acme/config\n";
 	exit EXIT_FAILURE;
 }
 

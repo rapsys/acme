@@ -13,7 +13,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-# Copyright (C) 2016 - 2017 Raphaël Gertz <acmepl@rapsys.eu>
+# Copyright (C) 2016 - 2017 Raphaël Gertz <acme@rapsys.eu>
 
 # Acme package
 package Acme;
@@ -90,7 +90,7 @@ use constant {
 	VERSION => 'v0.7',
 
 	# Config
-	CONFIG => '/etc/acmepl/config'
+	CONFIG => '/etc/acme/config'
 };
 
 # User agent object
