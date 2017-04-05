@@ -31,7 +31,7 @@ use File::Spec;
 use File::Slurp qw(read_file write_file);
 use JSON qw(decode_json);
 use IPC::System::Simple qw(capturex $EXITVAL);
-use acme qw(CERT_DIR CONFIG DS KEY_DIR SERVER_CRT SERVER_KEY);
+use Acme qw(CERT_DIR CONFIG DS KEY_DIR SERVER_CRT SERVER_KEY);
 
 # Load POSIX
 use POSIX qw(strftime EXIT_SUCCESS EXIT_FAILURE);
@@ -69,7 +69,7 @@ unless (
 		! scalar map {unless(defined($_->{cert}) && defined($_->{key}) && defined($_->{mail}) && defined($_->{domain}) && defined($_->{domains})) {1;} else {();}} @{$config->{certificates}}
 	}
 ) {
-	print 'Config file '.CONFIG.' is invalid'."\n";
+	print 'Config file '.CONFIG.' is not readable or invalid'."\n";
 	exit EXIT_FAILURE;
 }
 
