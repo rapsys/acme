@@ -50,26 +50,26 @@ for (my $i = 0; $i <= $#ARGV; $i++) {
 	# Match redhat types
 	if ($ARGV[$i] =~ /^(?:(\-r|\-\-redhat)(?:=([^-][a-zA-Z0-9_\.,-]+))?)$/) {
 		if (defined($2)) {
-			push(@redhat, split(',', $2));
+			push(@redhat, [split(',', $2)]);
 		# Extract next parameter
 		} elsif(defined($ARGV[$i+1]) && $ARGV[$i+1] =~ /^([^-][a-zA-Z0-9_\.,-]+)$/) {
-			push(@redhat, split(',', $1));
+			push(@redhat, [split(',', $1)]);
 			$i++;
 		# Set default
 		} else {
-			push(@redhat, ('example.com'));
+			push(@redhat, ['www.example.com','example.com','...']);
 		}
 	# Match debian types
 	} elsif ($ARGV[$i] =~ /^(?:(\-d|\-\-debian)(?:=([^-][a-zA-Z0-9_\.,-]+))?)$/) {
 		if (defined($2)) {
-			push(@debian, split(',', $2));
+			push(@debian, [split(',', $2)]);
 		# Extract next parameter
 		} elsif(defined($ARGV[$i+1]) && $ARGV[$i+1] =~ /^([^-][a-zA-Z0-9_\.,-]+)$/) {
-			push(@debian, split(',', $1));
+			push(@debian, [split(',', $1)]);
 			$i++;
 		# Set default
 		} else {
-			push(@debian, ('example.com'));
+			push(@debian, ['www.example.com','example.com','...']);
 		}
 	}
 }
@@ -81,26 +81,25 @@ if (scalar(@ARGV) < 1) {
 }
 
 # Append redhat style examples
-foreach my $key (@redhat) {
+for my $key (@redhat) {
+	my $domain = shift @{$key};
+	my @domains = $key;
 	tie(%{$root{certificates}[$#{$root{certificates}}+1]}, 'Tie::IxHash', (
 		# Public cert
 		#XXX: required
-		cert => '/etc/pki/tls/certs/'.$key.'.pem',
+		cert => '/etc/pki/tls/certs/'.$domain.'.pem',
 		# Private key
 		#XXX: required
-		key => '/etc/pki/tls/private/'.$key.'.pem',
+		key => '/etc/pki/tls/private/'.$domain.'.pem',
 		# Mail address
 		#XXX: required
-		mail => 'webmaster@'.$key,
+		mail => 'webmaster@'.$domain,
 		# Root domain
 		#XXX: required
-		domain => 'www.'.$key,
+		domain => $domain,
 		# Domain list
 		#XXX: required
-		domains => [
-			$key,
-			'...'
-		],
+		domains => @domains,
 		# Production certificate
 		#XXX: optional
 		#XXX: set to 1 for production
@@ -109,26 +108,25 @@ foreach my $key (@redhat) {
 }
 
 # Append debian style examples
-foreach my $key (@debian) {
+for my $key (@debian) {
+	my $domain = shift @{$key};
+	my @domains = $key;
 	tie(%{$root{certificates}[$#{$root{certificates}}+1]}, 'Tie::IxHash', (
 		# Public cert
 		#XXX: required
-		cert => '/etc/ssl/certs/'.$key.'.crt',
+		cert => '/etc/ssl/certs/'.$domain.'.crt',
 		# Private key
 		#XXX: required
-		key => '/etc/ssl/private/'.$key.'.key',
+		key => '/etc/ssl/private/'.$domain.'.key',
 		# Mail address
 		#XXX: required
-		mail => 'webmaster@'.$key,
+		mail => 'webmaster@'.$domain,
 		# Root domain
 		#XXX: required
-		domain => 'www.'.$key,
+		domain => $domain,
 		# Domain list
 		#XXX: required
-		domains => [
-			$key,
-			'...'
-		],
+		domains => @domains,
 		# Production certificate
 		#XXX: optional
 		#XXX: set to 1 for production
