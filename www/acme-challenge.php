@@ -19,4 +19,4 @@ if (
 header('Content-Type: text/plain');
 
 //Display key.thumbprint couple
-echo $_GET['key'].$thumbprint;
+echo $_GET['key'].'.'.$thumbprint;
