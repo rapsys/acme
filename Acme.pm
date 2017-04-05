@@ -15,8 +15,8 @@
 #
 # Copyright (C) 2016 - 2017 Raphaël Gertz <acmepl@rapsys.eu>
 
-# acme package
-package acme;
+# Acme package
+package Acme;
 
 # Best practice
 use strict;

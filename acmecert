@@ -13,7 +13,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-# Copyright (C) 2016 - 2017 Raphaël Gertz <acmepl@rapsys.eu>
+# Copyright (C) 2016 - 2017 Raphaël Gertz <acme@rapsys.eu>
 
 # Best practice
 use strict;
@@ -44,7 +44,7 @@ if (scalar(@ARGV) < 2) {
 }
 
 # Create new object
-my $acme = acme->new(shift @ARGV, $debug, $prod, @ARGV);
+my $acme = Acme->new(shift @ARGV, $debug, $prod, @ARGV);
 
 # Prepare environement
 $acme->prepare();

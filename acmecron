@@ -13,7 +13,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-# Copyright (C) 2016 - 2017 Raphaël Gertz <acmepl@rapsys.eu>
+# Copyright (C) 2016 - 2017 Raphaël Gertz <acme@rapsys.eu>
 
 # Best practice
 use strict;
@@ -31,7 +31,7 @@ use File::Spec;
 use File::Slurp qw(read_file write_file);
 use JSON qw(decode_json);
 use IPC::System::Simple qw(capturex $EXITVAL);
-use Acme qw(CERT_DIR CONFIG DS KEY_DIR SERVER_CRT SERVER_KEY);
+use Acme qw(CERT_DIR CONFIG DS KEY_DIR SERVER_CRT SERVER_KEY ACCOUNT_KEY);
 
 # Load POSIX
 use POSIX qw(strftime EXIT_SUCCESS EXIT_FAILURE);
@@ -119,6 +119,20 @@ foreach (@{$config->{certificates}}) {
 		next;
 	}
 
+	# Unlink if is a symlink
+	if (-l KEY_DIR.DS.ACCOUNT_KEY) {
+		unless(unlink(KEY_DIR.DS.ACCOUNT_KEY)) {
+			carp('unlink '.KEY_DIR.DS.ACCOUNT_KEY.' failed: '.$!);
+			next;
+		}
+	}
+
+	# Symlink to key
+	unless(symlink($_->{account}, KEY_DIR.DS.ACCOUNT_KEY)) {
+		carp('symlink '.$_->{account}.' to '.KEY_DIR.DS.ACCOUNT_KEY.' failed: '.$!);
+		next;
+	}
+
 	# Init args
 	my @args = @{$_->{domains}};
 
@@ -135,13 +149,13 @@ foreach (@{$config->{certificates}}) {
 		unshift(@args, '-d');
 	}
 
-	# Run letscert with args
-	my @out = capturex([0..1], 'letscert', @args);
+	# Run acmecert with args
+	my @out = capturex([0..1], 'acmecert', @args);
 
 	# Deal with error
 	if ($EXITVAL != 0) {
 		print join("\n", @out) if ($debug);
-		carp('letscert '.join(', ', @args).' failed: '.$!);
+		carp('acmecert '.join(', ', @args).' failed: '.$!);
 		next;
 	}
 

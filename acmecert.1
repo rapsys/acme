@@ -1,0 +1,31 @@
+.\" Manpage for acmecert.
+.\" Contact acme@rapsys.eu to correct errors or typos.
+.TH man 1 "05 Apr 2017" "0.7" "acmecert man page"
+.SH NAME
+acmecert \- generate a single certificate
+.SH SYNOPSIS
+acmecert [-(r|-redhat|d|-debian)] [example.com[,www.example.com,...]] [...]
+.SH DESCRIPTION
+acmecert is a basic script generating a single certificate based on parameters.
+.SH OPTIONS
+The acmecert takes options.
+
+Use -d for debug directive.
+
+Use -p for production mode.
+
+These directives require to be followed by an email address and the domain and alternative domain list.
+.SH EXAMPLE 1
+.TP
+.B acmecert -d webmaster@example.com example.com www.example.com ssl.example.com
+will generate a certificate for example.com with www.example.com and ssl.example.com alternatives domains with debug mode active.
+.SH EXAMPLE 2
+.TP
+.B acmecert -p webmaster@example.com example.com www.example.com ssl.example.com
+will generate a certificate for example.com with www.example.com and ssl.example.com alternatives domains with production mode active.
+.SH SEE ALSO
+acmecron(1),acmecert(1)
+.SH BUGS
+No known bugs.
+.SH AUTHOR
+Raphaël Gertz (rapsys) <acme@rapsys.eu>
