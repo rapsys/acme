@@ -19,7 +19,13 @@
 use strict;
 use warnings;
 
-# Load Acme
+# Fix use of acl
+use filetest qw(access);
+
+# Load dependancies
+use File::stat qw(stat);
+use File::Slurp qw(read_file);
+use JSON qw(decode_json);
 use Acme;
 
 # Load POSIX
@@ -28,44 +34,119 @@ use POSIX qw(EXIT_SUCCESS EXIT_FAILURE);
 # Init debug
 my $debug = 0;
 
-# Init prod
-my $prod = 0;
+# Init config
+my $config = undef;
+
+# Init config file name
+my $configFilename = '/etc/acme/config';
+
+# Init domains
+my @domains = ();
 
 # Strip and enable debug
 @ARGV = map { if ($_ eq '-d') { $debug = 1; (); } else { $_; } } @ARGV;
 
-# Strip and enable prod
-@ARGV = map { if ($_ eq '-p') { $prod = 1; (); } else { $_; } } @ARGV;
+# Strip and enable debug
+for (my $i = 0; $i <= $#ARGV; $i++) {
+	# Match redhat types
+	if ($ARGV[$i] =~ /^(?:(\-c|\-\-config)(?:=(.+))?)$/) {
+		if (defined($2) && -f $2) {
+			$configFilename = $2;
+			splice(@ARGV, $i, 1);
+			$i--;
+		# Extract next parameter
+		} elsif(defined($ARGV[$i+1]) && $ARGV[$i+1] =~ /^(.+)$/ && -f $1) {
+			$configFilename = $1;
+			splice(@ARGV, $i, 2);
+			$i--;
+		# Set default
+		} else {
+			print 'Config parameter without valid file name'."\n";
+			exit EXIT_FAILURE;
+		}
+	}
+}
 
-# Show usage
-if (scalar(@ARGV) < 2) {
-	print "Usage: $0 user\@example.com www.example.com [example.com] [...]\n";
+# Load config
+unless (
+	#XXX: use eval to workaround a fatal in decode_json
+	eval {
+		# Check file
+		(-f $configFilename) &&
+		# Read it
+		($config = read_file($configFilename)) &&
+		# Decode it
+		($config = decode_json($config)) &&
+		# Check hash validity
+		defined($config->{certificates}) &&
+		# Check not empty
+		scalar($config->{certificates}) &&
+		# Check hash validity
+		defined($config->{thumbprint}) &&
+		# Check certificates array
+		! scalar map {unless(defined($_->{cert}) && defined($_->{key}) && defined($_->{mail}) && defined($_->{domain}) && defined($_->{domains})) {1;} else {();}} @{$config->{certificates}}
+	}
+) {
+	print 'Config file '.$configFilename.' is not readable or invalid'."\n";
 	exit EXIT_FAILURE;
 }
 
-# Create new object
-my $acme = Acme->new(shift @ARGV, $debug, $prod, @ARGV);
+# Deal with specified domains
+if (scalar(@ARGV) > 0) {
+	# Check that domains are present in config
+	foreach my $domain (@ARGV) {
+		my $found = undef;
+		foreach my $certificate (@{$config->{certificates}}) {
+			if ($certificate->{domain} eq $domain) {
+				push(@domains, $certificate);
+				$found = 1;
+			}
+		}
+		unless($found) {
+			print 'Domain '.$domain.' not found in config file '.$configFilename."\n";
+			exit EXIT_FAILURE;
+		}
+	}
+# Without it
+} else {
+	# Populate domains array with available ones
+	foreach my $certificate (@{$config->{certificates}}) {
+		push(@domains, $certificate);
+	}
+}
 
-# Prepare environement
-$acme->prepare();
+# Show usage
+if (scalar(@domains) < 1) {
+	print "Usage: $0 [-(c|-config)[=/etc/acme/config]] [example.com] [...]\n";
+	exit EXIT_FAILURE;
+}
 
-# Generate required keys
-$acme->genKeys();
+# Deal with each domain
+foreach my $domain (@domains) {
+	# Create new object
+	my $acme = Acme->new($debug, $domain, {thumbprint => $config->{thumbprint}, pending => $config->{pending}, term => $config->{term}});
 
-# Generate csr
-$acme->genCsr();
+	# Prepare environement
+	$acme->prepare();
 
-# Directory
-$acme->directory();
+	# Generate required keys
+	$acme->genKeys();
 
-# Register
-$acme->register();
+	# Generate csr
+	$acme->genCsr();
 
-# Authorize
-$acme->authorize();
+	# Directory
+	$acme->directory();
 
-# Issue
-$acme->issue();
+	# Register
+	$acme->register();
+
+	# Authorize
+	$acme->authorize();
+
+	# Issue
+	$acme->issue();
+}
 
 # Exit with success
 exit EXIT_SUCCESS;
