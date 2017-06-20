@@ -20,21 +20,16 @@ use strict;
 use warnings;
 
 # Fix use of acl
-use filetest 'access';
+use filetest qw(access);
 
 # Load dependancies
-use Carp qw(carp confess);
-use DateTime;
-use File::Path qw(make_path);
 use File::stat qw(stat);
-use File::Spec;
-use File::Slurp qw(read_file write_file);
+use File::Slurp qw(read_file);
 use JSON qw(decode_json);
-use IPC::System::Simple qw(capturex $EXITVAL);
-use Acme qw(CERT_DIR CONFIG DS KEY_DIR SERVER_CRT SERVER_KEY ACCOUNT_KEY);
+use Acme;
 
 # Load POSIX
-use POSIX qw(strftime EXIT_SUCCESS EXIT_FAILURE);
+use POSIX qw(EXIT_SUCCESS EXIT_FAILURE);
 
 # Init debug
 my $debug = 0;
@@ -42,21 +37,44 @@ my $debug = 0;
 # Init config
 my $config = undef;
 
+# Init config file name
+my $configFilename = '/etc/acme/config';
+
+# Init domains
+my @domains = ();
+
 # Strip and enable debug
 @ARGV = map { if ($_ eq '-d') { $debug = 1; (); } else { $_; } } @ARGV;
 
-# Check config file
-if (! -f CONFIG) {
-	print 'Config file '.CONFIG.' do not exists'."\n";
-	exit EXIT_FAILURE;
+# Strip and enable debug
+for (my $i = 0; $i <= $#ARGV; $i++) {
+	# Match redhat types
+	if ($ARGV[$i] =~ /^(?:(\-c|\-\-config)(?:=(.+))?)$/) {
+		if (defined($2) && -f $2) {
+			$configFilename = $2;
+			splice(@ARGV, $i, 1);
+			$i--;
+		# Extract next parameter
+		} elsif(defined($ARGV[$i+1]) && $ARGV[$i+1] =~ /^(.+)$/ && -f $1) {
+			$configFilename = $1;
+			splice(@ARGV, $i, 2);
+			$i--;
+		# Set default
+		} else {
+			print 'Config parameter without valid file name'."\n";
+			exit EXIT_FAILURE;
+		}
+	}
 }
 
 # Load config
 unless (
 	#XXX: use eval to workaround a fatal in decode_json
 	eval {
+		# Check file
+		(-f $configFilename) &&
 		# Read it
-		($config = read_file(CONFIG)) &&
+		($config = read_file($configFilename)) &&
 		# Decode it
 		($config = decode_json($config)) &&
 		# Check hash validity
@@ -69,120 +87,70 @@ unless (
 		! scalar map {unless(defined($_->{cert}) && defined($_->{key}) && defined($_->{mail}) && defined($_->{domain}) && defined($_->{domains})) {1;} else {();}} @{$config->{certificates}}
 	}
 ) {
-	print 'Config file '.CONFIG.' is not readable or invalid'."\n";
+	print 'Config file '.$configFilename.' is not readable or invalid'."\n";
 	exit EXIT_FAILURE;
 }
 
-# Deal with certificates
-foreach (@{$config->{certificates}}) {
-	# Init variables
-	my ($mtime, $dt, $suffix) = undef;
+# Deal with specified domains
+if (scalar(@ARGV) > 0) {
+	# Check that domains are present in config
+	foreach my $domain (@ARGV) {
+		my $found = undef;
+		foreach my $certificate (@{$config->{certificates}}) {
+			if ($certificate->{domain} eq $domain) {
+				push(@domains, $certificate);
+				$found = 1;
+			}
+		}
+		unless($found) {
+			print 'Domain '.$domain.' not found in config file '.$configFilename."\n";
+			exit EXIT_FAILURE;
+		}
+	}
+# Without it
+} else {
+	# Populate domains array with available ones
+	foreach my $certificate (@{$config->{certificates}}) {
+		push(@domains, $certificate);
+	}
+}
 
+# Show usage
+if (scalar(@domains) < 1) {
+	print "Usage: $0 [-(c|-config)[=/etc/acme/config]] [example.com] [...]\n";
+	exit EXIT_FAILURE;
+}
+
+# Deal with each domain
+foreach my $domain (@domains) {
 	# Skip certificate without 60 days
-	if (-f $_->{cert} && ($mtime = stat($_->{cert})->mtime) >= (time() - 60*24*3600)) {
+	if (-f $domain->{cert} && stat($domain->{cert})->mtime >= (time() - 60*24*3600)) {
 		next;
 	}
 
-	# Extract cert directory and filename
-	my (undef, $certDir) = File::Spec->splitpath($_->{cert});
+	# Create new object
+	my $acme = Acme->new($debug, $domain, {thumbprint => $config->{thumbprint}, pending => $config->{pending}, term => $config->{term}});
 
-	# Check that certificate is writable
-	unless (-w $certDir || -w $_->{cert}) {
-		carp('directory '.$certDir.' or file '.$_->{cert}.' must be writable: '.$!);
-		next;
-	}
+	# Prepare environement
+	$acme->prepare();
 
-	# Check that key directory exists
-	if (! -d KEY_DIR) {
-		# Create all paths
-		make_path(KEY_DIR, {error => \my $err});
-		if (@$err) {
-			map {
-				my ($file, $msg) = %$_;
-				carp ($file eq '' ? '' : $file.': ').$msg if ($debug);
-			} @$err;
-			confess 'make_path failed';
-		}
-	}
+	# Generate required keys
+	$acme->genKeys();
 
-	# Unlink if is a symlink
-	if (-l KEY_DIR.DS.SERVER_KEY) {
-		unless(unlink(KEY_DIR.DS.SERVER_KEY)) {
-			carp('unlink '.KEY_DIR.DS.SERVER_KEY.' failed: '.$!);
-			next;
-		}
-	}
+	# Generate csr
+	$acme->genCsr();
 
-	# Symlink to key
-	unless(symlink($_->{key}, KEY_DIR.DS.SERVER_KEY)) {
-		carp('symlink '.$_->{key}.' to '.KEY_DIR.DS.SERVER_KEY.' failed: '.$!);
-		next;
-	}
+	# Directory
+	$acme->directory();
 
-	# Unlink if is a symlink
-	if (-l KEY_DIR.DS.ACCOUNT_KEY) {
-		unless(unlink(KEY_DIR.DS.ACCOUNT_KEY)) {
-			carp('unlink '.KEY_DIR.DS.ACCOUNT_KEY.' failed: '.$!);
-			next;
-		}
-	}
+	# Register
+	$acme->register();
 
-	# Symlink to key
-	unless(symlink($_->{account}, KEY_DIR.DS.ACCOUNT_KEY)) {
-		carp('symlink '.$_->{account}.' to '.KEY_DIR.DS.ACCOUNT_KEY.' failed: '.$!);
-		next;
-	}
+	# Authorize
+	$acme->authorize();
 
-	# Init args
-	my @args = @{$_->{domains}};
-
-	# Prepend mail and domain to other args
-	unshift(@args, $_->{mail}, $_->{domain});
-
-	# Preprend prod
-	if (defined $_->{prod} && $_->{prod}) {
-		unshift(@args, '-p');
-	}
-
-	# Preprend debug
-	if ($debug) {
-		unshift(@args, '-d');
-	}
-
-	# Run acmecert with args
-	my @out = capturex([0..1], 'acmecert', @args);
-
-	# Deal with error
-	if ($EXITVAL != 0) {
-		print join("\n", @out) if ($debug);
-		carp('acmecert '.join(', ', @args).' failed: '.$!);
-		next;
-	}
-
-	# Read cert
-	my $content;
-	unless($content = read_file(CERT_DIR.DS.SERVER_CRT)) {
-		carp('read_file '.CERT_DIR.DS.SERVER_CRT.' failed: '.$!);
-		next;
-	}
-
-	# Handle old certificate
-	if (-w $certDir && -f $_->{cert}) {
-		# Extract datetime suffix
-		$suffix = ($dt = DateTime->from_epoch(epoch => $mtime))->ymd('').$dt->hms('');
-
-		# Rename old certificate
-		unless(rename($_->{cert}, $_->{cert}.'.'.$suffix)) {
-			carp('rename '.$_->{cert}.' to '.$_->{cert}.'.'.$suffix.' failed: '.$!);
-			next;
-		}
-	}
-
-	# Save cert
-	unless(write_file($_->{cert}, $content)) {
-		carp('write_file '.$_->{cert}.' failed: '.$!);
-		next;
-	}
+	# Issue
+	$acme->issue();
 }
 
 # Exit with success

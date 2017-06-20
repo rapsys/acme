@@ -22,16 +22,20 @@ package Acme;
 use strict;
 use warnings;
 
+# Fix use of acl
+use filetest qw(access);
+
 # Symbol export
 use Exporter;
 our @ISA = qw(Exporter);
-our @EXPORT_OK = qw(DS CERT_DIR KEY_DIR REQUEST_CSR ACCOUNT_KEY SERVER_KEY SERVER_CRT CONFIG);
+our @EXPORT_OK = qw(VERSION);
 
 # Load dependancies
 use Carp qw(carp confess);
 use Date::Parse qw(str2time);
 use Digest::SHA qw(sha256_base64);
 use Email::Valid;
+use File::Copy qw(copy);
 use File::Path qw(make_path);
 use File::Slurp qw(read_file write_file);
 use File::Temp; # qw( :seekable );
@@ -43,6 +47,9 @@ use Net::Domain::TLD;
 use POSIX qw(EXIT_FAILURE);
 use Tie::IxHash;
 
+# Debug
+use Data::Dumper;
+
 # Documentation links
 #XXX: see https://letsencrypt.github.io/acme-spec/ (probably based on https://ietf-wg-acme.github.io/acme/)
 #XXX: see jwk rfc http://www.rfc-editor.org/rfc/rfc7517.txt
@@ -50,29 +57,8 @@ use Tie::IxHash;
 
 # Set constants
 use constant {
-	# Directory separator
-	DS => '/',
-
-	# Directory for certificates
-	CERT_DIR => 'cert',
-
-	# Directory for keys
-	KEY_DIR => 'key',
-
-	# Directory for pending cache
-	PENDING_DIR => 'pending',
-
 	# Request certificate file name
 	REQUEST_CSR => 'request.der',
-
-	# Account key file name
-	ACCOUNT_KEY => 'account.pem',
-
-	# Server private key
-	SERVER_KEY => 'server.pem',
-
-	# Server public certificate
-	SERVER_CRT => 'server.crt',
 
 	# rsa
 	KEY_TYPE => 'rsa',
@@ -84,13 +70,9 @@ use constant {
 	ACME_CERT => 'https://letsencrypt.org/certs/lets-encrypt-x3-cross-signed.pem',
 	ACME_DIR => 'https://acme-staging.api.letsencrypt.org/directory',
 	ACME_PROD_DIR => 'https://acme-v01.api.letsencrypt.org/directory',
-	ACME_TERMS => 'https://letsencrypt.org/documents/LE-SA-v1.1.1-August-1-2016.pdf',
 
 	# Version
-	VERSION => 'v0.7',
-
-	# Config
-	CONFIG => '/etc/acme/config'
+	VERSION => 'v0.8',
 };
 
 # User agent object
@@ -124,7 +106,7 @@ tie(%{$jwk{jwk}{jwk}}, 'Tie::IxHash', e => undef, kty => uc(KEY_TYPE), n => unde
 # Constructor
 sub new {
 	# Extract params
-	my ($class, $mail, $debug, $prod, @domains) = @_;
+	my ($class, $debug, $domain, $config) = @_;
 
 	# Create self hash
 	my $self = {};
@@ -135,21 +117,27 @@ sub new {
 	# Save debug
 	$self->{debug} = $debug;
 
-	# Save prod
-	$self->{prod} = $prod;
+	# Save domain
+	$self->{domain} = $domain;
+
+	# Save config
+	$self->{config} = $config;
+
+	# Save domains
+	@{$self->{domains}} = ($domain->{domain}, @{$domain->{domains}});
 
 	# Add extra check to mail validity
 	#XXX: mxcheck fail if there is only a A record on the domain
 	my $ev = Email::Valid->new(-fqdn => 1, -tldcheck => 1, -mxcheck => 1);
 
 	# Show error if check fail
-	if (! defined $ev->address($mail)) {
+	if (! defined $ev->address($self->{domain}{mail})) {
 		map { carp 'failed check: '.$_ if ($self->{debug}) } $ev->details();
 		confess 'Email::Valid->address failed';
 	}
 
 	# Save mail
-	$self->{mail} = $mail;
+	$self->{mail} = $self->{domain}{mail};
 
 	# Create resolver
 	my $res = new Net::DNS::Resolver();
@@ -177,10 +165,7 @@ sub new {
 				confess 'search recursively A record for '.$_.' failed';
 			}
 		}
-	} @domains;
-
-	# Save domains
-	@{$self->{domains}} = @domains;
+	} @{$self->{domains}};
 
 	# Return class reference
 	return $self;
@@ -190,19 +175,58 @@ sub new {
 sub prepare {
 	my ($self) = @_;
 
+	# Extract cert directory and filename
+	my ($certFile, $certDir) = File::Spec->splitpath($self->{domain}{cert});
+
+	# Extract key directory and filename
+	my ($keyFile, $keyDir) = File::Spec->splitpath($self->{domain}{key});
+
+	# Extract account directory and filename
+	my ($accountFile, $accountDir) = File::Spec->splitpath($self->{domain}{account});
+
 	# Create all paths
-	make_path(CERT_DIR, KEY_DIR, PENDING_DIR.'/'.$self->{mail}.'.'.($self->{prod} ? 'prod' : 'staging'), {error => \my $err});
-	if (@$err) {
-		map {
-			my ($file, $msg) = %$_;
-			carp ($file eq '' ? '' : $file.': ').$msg if ($self->{debug});
-		} @$err;
-		confess 'make_path failed';
+	{
+		make_path($certDir, $keyDir, $accountDir, $self->{config}{pending}.'/'.$self->{mail}.'.'.($self->{domain}{prod} ? 'prod' : 'staging'), {error => \my $err});
+		if (@$err) {
+			map {
+				my ($file, $msg) = %$_;
+				carp ($file eq '' ? '' : $file.': ').$msg if ($self->{debug});
+			} @$err;
+			confess 'make_path failed';
+		}
 	}
 
 	# Create user agent
 	$ua = LWP::UserAgent->new;
-	$ua->agent(__PACKAGE__.'/'.VERSION)
+	$ua->agent(__PACKAGE__.'/'.VERSION);
+
+	# Check that certificate is writable
+	unless (-w $certDir || -w $self->{domain}{cert}) {
+		confess('Directory '.$certDir.' or file '.$self->{domain}{cert}.' must be writable: '.$!);
+	}
+
+	# Check that key is writable
+	unless (-r $self->{domain}{key} || -w $keyDir) {
+		confess('File '.$self->{domain}{key}.' must be readable or directory '.$keyDir.' must be writable: '.$!);
+	}
+
+	# Check that account is writable
+	unless (-r $self->{domain}{account} || -w $accountDir) {
+		confess('File '.$self->{domain}{account}.' must be readable or directory '.$accountDir.' must be writable: '.$!);
+	}
+
+	# Backup old certificate if possible
+	if (-w $certDir && -f $self->{domain}{cert}) {
+		my ($dt, $suffix) = undef;
+
+		# Extract datetime suffix
+		$suffix = ($dt = DateTime->from_epoch(epoch => stat($self->{domain}{cert})->mtime))->ymd('').$dt->hms('');
+
+		# Rename old certificate
+		unless(copy($self->{domain}{cert}, $self->{domain}{cert}.'.'.$suffix)) {
+			carp('Copy '.$self->{domain}{cert}.' to '.$self->{domain}{cert}.'.'.$suffix.' failed: '.$!);
+		}
+	}
 }
 
 # Drop stderr
@@ -239,7 +263,7 @@ sub genKeys {
 			# Restore stderr
 			_restoreStdErr();
 		}
-	} (KEY_DIR.DS.ACCOUNT_KEY, KEY_DIR.DS.SERVER_KEY);
+	} ($self->{domain}{account}, $self->{domain}{key});
 
 	# Extract modulus and publicExponent jwk
 	#XXX: same here we tie to keep ordering
@@ -252,12 +276,12 @@ sub genKeys {
 			# Extract to binary from int, trim leading zeros and convert to base64 url
 			chomp ($self->{account}{jwk}{jwk}{e} = encode_base64url(pack("N", $1) =~ s/^\0+//r));
 		}
-	} capturex('openssl', ('rsa', '-text', '-in', KEY_DIR.DS.ACCOUNT_KEY, '-noout', '-modulus'));
+	} capturex('openssl', ('rsa', '-text', '-in', $self->{domain}{account}, '-noout', '-modulus'));
 
 	# Drop stderr
 	_dropStdErr();
 	# Extract account public key
-	$self->{account}{pubkey} = join('', map { chomp; $_; } capturex('openssl', ('rsa', '-in', KEY_DIR.DS.ACCOUNT_KEY, '-pubout')));
+	$self->{account}{pubkey} = join('', map { chomp; $_; } capturex('openssl', ('rsa', '-in', $self->{domain}{account}, '-pubout')));
 	# Restore stderr
 	_restoreStdErr();
 
@@ -273,18 +297,21 @@ sub genCsr {
 	# Openssl config template
 	my $oct = File::Temp->new();
 
+	# Save data start position
+	my $pos = tell DATA;
+
 	# Load template from data
 	map { s/__EMAIL_ADDRESS__/$self->{mail}/; s/__COMMON_NAME__/$self->{domains}[0]/; print $oct $_; } <DATA>;
 
-	# Close data
-	close(DATA);
+	# Reseek data
+	seek(DATA, $pos, 0);
 
 	# Append domain names
 	my $i = 1;
 	map { print $oct 'DNS.'.$i++.' = '.$_."\n"; } @{$self->{domains}};
 
 	# Generate csr
-	capturex('openssl', ('req', '-new', '-outform', 'DER', '-key', KEY_DIR.DS.SERVER_KEY, '-config', $oct->filename, '-out', CERT_DIR.DS.REQUEST_CSR));
+	capturex('openssl', ('req', '-new', '-outform', 'DER', '-key', $self->{domain}{key}, '-config', $oct->filename, '-out', $self->{config}{pending}.'/'.$self->{mail}.'.'.($self->{domain}{prod} ? 'prod' : 'staging').'/'.REQUEST_CSR));
 
 	# Close oct
 	close($oct);
@@ -338,7 +365,7 @@ sub _post {
 	close($stf);
 
 	# Generate digest of stf
-	my $signature = encode_base64url(join('', capturex('openssl', ('dgst', '-sha256', '-binary', '-sign', KEY_DIR.DS.ACCOUNT_KEY, $stf->filename))) =~ s/^\0+//r);
+	my $signature = encode_base64url(join('', capturex('openssl', ('dgst', '-sha256', '-binary', '-sign', $self->{domain}{account}, $stf->filename))) =~ s/^\0+//r);
 
 	# Create a request
 	my $req = HTTP::Request->new(POST => $uri);
@@ -398,23 +425,10 @@ sub _httpCheck {
 	# Create a request
 	my $req = HTTP::Request->new(GET => 'http://'.$domain.'/.well-known/acme-challenge/'.$token);
 
-	# Load config if available
-	my $config = undef;
-	if (
-		#XXX: use eval to workaround a fatal in from_json
-		defined eval {
-			# Check that file exists
-			-f CONFIG &&
-			# Read it
-			($config = read_file(CONFIG)) &&
-			# Decode it
-			($config = from_json($config)) &&
-			# Check defined
-			$config->{thumbprint}
-		}
-	) {
+	# Check if thumbprint is writeable
+	if (-w $self->{config}{thumbprint}) {
 		# Try to write thumbprint
-		write_file($config->{thumbprint}, $self->{account}{thumbprint});
+		write_file($self->{config}{thumbprint}, $self->{account}{thumbprint});
 	}
 
 	# Get request
@@ -443,7 +457,7 @@ sub register {
 
 	# Post new-reg request
 	#XXX: contact array may contain a tel:+33612345678 for example
-	my $res = $self->_post($self->{'new-reg'}, {resource => 'new-reg', contact => ['mailto:'.$self->{mail}], agreement => ACME_TERMS});
+	my $res = $self->_post($self->{'new-reg'}, {resource => 'new-reg', contact => ['mailto:'.$self->{mail}], agreement => $self->{term}});
 
 	# Handle error
 	unless ($res->is_success || $res->code eq 409) {
@@ -482,7 +496,7 @@ sub authorize {
 		my $content = undef;
 
 		# Init file
-		my $file = PENDING_DIR.'/'.$self->{mail}.'.'.($self->{prod} ? 'prod' : 'staging').'/'.$_;
+		my $file = $self->{config}{pending}.'/'.$self->{mail}.'.'.($self->{domain}{prod} ? 'prod' : 'staging').'/'.$_;
 
 		# Load auth request content or post a new one
 		#TODO: add more check on cache file ???
@@ -624,23 +638,10 @@ sub authorize {
 		} map { $self->{challenges}{$_}{status} eq 'pending' ? $_ : (); } keys %{$self->{challenges}};
 	} 
 
-	# Load config if available
-	my $config = undef;
-	if (
-		#XXX: use eval to workaround a fatal in from_json
-		defined eval {
-			# Check that file exists
-			-f CONFIG &&
-			# Read it
-			($config = read_file(CONFIG)) &&
-			# Decode it
-			($config = from_json($config)) &&
-			# Check defined
-			$config->{thumbprint}
-		}
-	) {
+	# Check if thumbprint is writeable
+	if (-w $self->{config}{thumbprint}) {
 		# Try to write thumbprint
-		write_file($config->{thumbprint}, '');
+		write_file($self->{config}{thumbprint}, '');
 	}
 
 	# Stop here with remaining chanllenge
@@ -671,7 +672,7 @@ sub issue {
 	my ($self) = @_;
 
 	# Open csr file
-	open(my $fh, '<', CERT_DIR.DS.REQUEST_CSR) or die $!;
+	open(my $fh, '<', $self->{config}{pending}.'/'.$self->{mail}.'.'.($self->{domain}{prod} ? 'prod' : 'staging').'/'.REQUEST_CSR) or die $!;
 
 	# Load csr
 	my $csr = encode_base64url(join('', <$fh>) =~ s/^\0+//r);
@@ -688,7 +689,7 @@ sub issue {
 	}
 
 	# Open crt file
-	open($fh, '>', CERT_DIR.DS.SERVER_CRT) or die $!;
+	open($fh, '>', $self->{domain}{cert}) or die $!;
 
 	# Convert to pem
 	print $fh '-----BEGIN CERTIFICATE-----'."\n".encode_base64($res->content).'-----END CERTIFICATE-----'."\n";
@@ -711,7 +712,7 @@ sub issue {
 	close($fh) or die $!;
 
 	# Print success
-	carp 'Success, pem certificate in '.CERT_DIR.DS.SERVER_CRT if ($self->{debug});
+	carp 'Success, pem certificate in '.$self->{domain}{cert} if ($self->{debug});
 }
 
 1;
