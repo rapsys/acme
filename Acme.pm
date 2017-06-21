@@ -33,11 +33,13 @@ our @EXPORT_OK = qw(VERSION);
 # Load dependancies
 use Carp qw(carp confess);
 use Date::Parse qw(str2time);
+use DateTime;
 use Digest::SHA qw(sha256_base64);
 use Email::Valid;
 use File::Copy qw(copy);
 use File::Path qw(make_path);
 use File::Slurp qw(read_file write_file);
+use File::stat qw(stat);
 use File::Temp; # qw( :seekable );
 use IPC::System::Simple qw(capturex);
 use JSON qw(from_json to_json);
@@ -72,7 +74,7 @@ use constant {
 	ACME_PROD_DIR => 'https://acme-v01.api.letsencrypt.org/directory',
 
 	# Version
-	VERSION => 'v0.8',
+	VERSION => 'v0.9',
 };
 
 # User agent object
