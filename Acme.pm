@@ -324,7 +324,7 @@ sub directory {
 	my $time = time;
 
 	# Set directory
-	my $dir = $self->{prod} ? ACME_PROD_DIR : ACME_DIR;
+	my $dir = $self->{domain}{prod} ? ACME_PROD_DIR : ACME_DIR;
 
 	# Create a request
 	my $req = HTTP::Request->new(GET => $dir.'?'.$time);
