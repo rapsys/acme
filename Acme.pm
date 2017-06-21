@@ -49,9 +49,6 @@ use Net::Domain::TLD;
 use POSIX qw(EXIT_FAILURE);
 use Tie::IxHash;
 
-# Debug
-use Data::Dumper;
-
 # Documentation links
 #XXX: see https://letsencrypt.github.io/acme-spec/ (probably based on https://ietf-wg-acme.github.io/acme/)
 #XXX: see jwk rfc http://www.rfc-editor.org/rfc/rfc7517.txt
