@@ -602,10 +602,10 @@ sub authorize {
 	} @{$self->{domains}};
 
 	# Init max run
-	my $remaining = 10;
+	my $remaining = 300;
 
 	# Poll pending
-	while (--$remaining >= 0 and scalar map { $_->{status} eq 'valid' ? 1 : (); } values %{$self->{challenges}}) {
+	while (--$remaining >= 0 and scalar map { $_->{status} eq 'pending' ? 1 : (); } values %{$self->{challenges}}) {
 		# Sleep
 		sleep(1);
 		# Poll remaining pending
