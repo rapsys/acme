@@ -42,8 +42,6 @@ my $prod = 0;
 # Strip and enable prod
 @ARGV = map { if ($_ eq '-p') { $prod = 1; (); } else { $_; } } @ARGV;
 
-use Data::Dumper;
-
 # Strip and enable debug
 for (my $i = 0; $i <= $#ARGV; $i++) {
 	# Match redhat types
