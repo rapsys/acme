@@ -71,7 +71,7 @@ use constant {
 	ACME_PROD_DIR => 'https://acme-v01.api.letsencrypt.org/directory',
 
 	# Version
-	VERSION => 'v0.9',
+	VERSION => '1.3',
 };
 
 # User agent object
