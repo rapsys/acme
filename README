@@ -1,0 +1,109 @@
+
+                                  Acme 2.0.0
+
+                    Raphaël Gertz (Rapsys) <acme@rapsys.eu>
+
+             This program generate letsencrypt free certificates.
+
+
+
+ 01. What's acme? 
+ ----------------
+
+ Acme is a fast and simple certificate generator using ACME v2 API.
+
+ Consult:
+
+ * man 1 acme: general documentation.
+
+ * man 1 acme-conf: about config generation.
+
+ * man 1 acme-cert: about certificate generation.
+
+ * man 1 acme-cron: about cron job setup.
+
+
+
+ 02. Acme conf
+ -------------
+
+ * acme conf [-(v|-verbose)] [-(c|-config)[=/etc/acme/config]]
+   example.com[=www.example.com[,cdn.example.com]] [...] [-(d|-debian)]
+
+
+
+ 03. Acme cert
+ -------------
+
+ * acme cert [-(v|-verbose)] [-(c|-config)[=/etc/acme/config]] [example.com]
+   [...]
+
+
+
+ 04. Acme cron
+ -------------
+
+ * acme cron [-(v|-verbose)] [-(c|-config)[=/etc/acme/config]] [example.com]
+   [...]
+
+
+
+ 05. Acme options
+ ----------------
+
+ * --verbose: Produces a verbose report about the current process for the
+              purpose of problem analysis.
+
+ * --config:  Use the specified configuration file. If the pathname is omitted,
+              the file specified in Acme::CONFIG constant is assumed.
+              Default value is /etc/acme/config
+
+ * --debian:  Use debian specific path schema in configuration file. If omitted,
+              the default redhat path schema is assumed.
+
+
+
+ 06. Contribute
+ --------------
+
+ You may buy me a Beer, a Tea or help with Server fees with a paypal donation to
+ the address <paypal@rapsys.eu> or via the donation page.
+
+ Don't forget to show your love for this project, feel free to report bugs to
+ the author, issues which are security relevant should be disclosed privately
+ first.
+
+ Patches are welcomed and grant credit when requested.
+
+
+
+ 07. Donation
+ ------------
+
+ https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=JNWGK8Z2TBHFN
+
+
+
+ 08. Documentation
+ -----------------
+
+ A formated and hyperlinked copy of the lastest ACME v2 API documentation can be
+ viewed at: https://ietf-wg-acme.github.io/acme/draft-ietf-acme-acme.html
+
+ This Acme implementation can be used for Let's Encrypt free, automated and open
+ certificate authority, their documentation can be viewed at:
+ https://letsencrypt.org/docs/
+
+
+
+ 09. Author
+ ----------
+
+ Raphaël Gertz (Rapsys) <acme@rapsys.eu>
+
+
+
+ 10. Bugs
+ --------
+
+ No known bugs.
