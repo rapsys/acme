@@ -1,0 +1,491 @@
+#! /usr/bin/perl
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# Copyright (C) 2016 - 2020 Raphaël Gertz <acme@rapsys.eu>
+
+# Best practice
+use strict;
+use warnings;
+
+# Load debug
+#BEGIN {
+#	# Allow use of print Dumper($this);
+#	use Data::Dumper;
+#	# Prepend current directory in include array
+#	# XXX: this will load ./Acme.pm instead of an other version from system tree
+#	unshift @INC, '.';
+#}
+
+# Add acl support to file tests
+use filetest qw(access);
+
+# Load dependancies
+use Carp qw(carp confess);
+use File::Copy qw(copy);
+use File::stat qw(stat);
+use File::Slurp qw(read_file write_file);
+use File::Spec qw(splitpath curdir);
+use JSON qw(decode_json);
+use Net::DNS qw();
+use Net::Domain::TLD qw(tld_exists);
+use Tie::IxHash;
+use Acme;
+
+# Load POSIX
+use POSIX qw(EXIT_SUCCESS EXIT_FAILURE);
+
+# Init verbose
+my $verbose = 0;
+
+# Init debian
+my $debian = undef;
+
+# Init action
+my $action = undef;
+
+# Init config
+my $config = undef;
+#XXX: tie to Tie::IxHash to keep a stable ordering of hash keys
+tie(%{$config}, 'Tie::IxHash');
+
+# Init content
+my $content = undef;
+
+# Init config file name
+my $configFilename = Acme::CONFIG;
+
+# Init domains
+my @domains = ();
+
+# Process verbose
+@ARGV = map { if ($_ eq '-v' or $_ eq '--verbose') { $verbose = 1; (); } else { $_; } } @ARGV;
+
+# Process debian
+@ARGV = map { if ($_ eq '-d' or $_ eq '--debian') { $debian = 1; (); } else { $_; } } @ARGV;
+
+# Process action
+unless(defined $ARGV[0] and $ARGV[0] =~ /^(cert|cron|conf)$/) {
+	print "Usage: $0 (cert|cron|conf) [-(v|-verbose)] [-(c|-config)[=/etc/acme/config]] [example.com] [...]\n";
+	exit EXIT_FAILURE;
+} else {
+	# Save action
+	$action = $ARGV[0];
+	# Remove it from args
+	splice(@ARGV, 0, 1);
+}
+
+# Process config and args
+for (my $i = 0; $i <= $#ARGV; $i++) {
+	# Match config args
+	if ($ARGV[$i] =~ /^(?:(\-c|\-\-config)(?:=(.+))?)$/) {
+		# Extract -c=$2 or --config=$2 syntax
+		if (defined($2)) {
+			$configFilename = $2;
+			splice(@ARGV, $i, 1);
+			$i--;
+		# Extract -c $ARGV[$i+1] or --config $ARGV[$i+1] writable status
+		} elsif (defined($ARGV[$i+1])) {
+			$configFilename = $ARGV[$i+1];
+			splice(@ARGV, $i, 2);
+			$i--;
+		# Check if cert or cron action
+		} elsif ($action eq 'cert' or $action eq 'cron') {
+			print "Usage: $0 $action [-(c|-config)[=/etc/acme/config]] [example.com] [...]\n";
+			exit EXIT_FAILURE;
+		}
+
+		# Check if file don't exists
+		if (defined($configFilename) and ! -f $configFilename) {
+			# Extract config directory and filename
+			my ($vol, $dir, $file) = File::Spec->splitpath($configFilename);
+
+			# Check dir
+			unless ($dir) {
+				# Set as current dir if empty
+				$dir = File::Spec->curdir();
+			}
+
+			# Verify that directory exists
+			unless (-d $dir) {
+				confess('Config directory '.$dir.' must exists: '.$!);
+			}
+
+			# Check that directory is writable
+			unless (-w $dir) {
+				confess('Config directory '.$dir.' must be writable: '.$!);
+			}
+		}
+	}
+}
+
+# Check if conf action
+if ($action eq 'conf') {
+	# Configure json
+	my $js = JSON->new->utf8->pretty(1)->space_before(0)->filter_json_object(
+		sub {
+			# Get source hash ref
+			my ($x) = @_;
+			# Init tied hash
+			#XXX: tie to Tie::IxHash to keep a stable ordering of hash keys
+			my $r = tie(my %r, 'Tie::IxHash');
+			# Ordered loop
+			map {
+				# Insert key if present
+				$r{$_} = $x->{$_} if (defined($x->{$_}));
+			#XXX: Hash keys not present in this array will be dropped
+			#XXX: Hash keys will be inserted in tied hash in this order
+			#} sort keys %{$x};
+			} (
+				# Root key order
+				'thumbprint', 'term', 'pending', 'certificates',
+				# Domain key order
+				'cert', 'key', 'account', 'mail', 'domain', 'domains', 'prod'
+			);
+			# Return the ordered hash
+			return \%r;
+		}
+	);
+
+	# Check we have specified domains
+	unless (scalar(@ARGV) > 0) {
+		print "Usage: $0 $action [-(v|-verbose)] [-(d|-debian)] [-(c|-config)[=/etc/acme/config]] example.com[=www.example.com[,ftp.example.com]] [...]\n";
+		exit EXIT_FAILURE;
+	}
+
+	# Load config
+	unless(
+		#XXX: use eval to workaround a fatal in decode_json
+		eval {
+			# Check file
+			(-f $configFilename) and
+			# Read it
+			($content = read_file($configFilename)) and
+			# Decode it
+			($config = $js->decode($content))
+		}
+	) {
+		# Warn with verbose
+		carp('Config file '.$configFilename.' not readable or invalid: '.$!) if ($verbose);
+
+		# Create a default config
+		#XXX: tie to Tie::IxHash to keep a stable ordering of hash keys
+		tie(%{$config}, 'Tie::IxHash', 'thumbprint' => Acme::THUMBPRINT, 'term' => Acme::TERM, 'pending' => Acme::PENDING, 'certificates' => []);
+	} else {
+		# Fix root infos when missing
+		$config->{thumbprint} = Acme::THUMBPRINT unless(defined($config->{thumbprint}));
+		$config->{term} = Acme::TERM unless(defined($config->{term}));
+		$config->{pending} = Acme::PENDING unless(defined($config->{pending}));
+		$config->{certificates} = [] unless(defined($config->{certificates}) and ref($config->{certificates}) eq 'ARRAY');
+	}
+
+	# Iterate on each certificates entry
+	for (my $i = 0; $i <= $#{$config->{certificates}}; $i++) {
+		# Set certificate
+		my $certificate = ${$config->{certificates}}[$i];
+
+		# Drop the entry when missing domain key
+		unless (defined($certificate->{domain})) {
+			splice(@{$config->{certificates}}, $i, 1);
+		# Entry may be fixed
+		} else {
+			# Init replace
+			my $replace = undef;
+
+			# Tie replace
+			#XXX: tie to Tie::IxHash to keep a stable ordering of hash keys
+			tie(%{$replace}, 'Tie::IxHash', cert => Acme::RH_CERTS.'/'.$certificate->{domain}.Acme::RH_SUFFIX, key => Acme::RH_PRIVATE.'/'.$certificate->{domain}.Acme::RH_SUFFIX, account => Acme::ACCOUNT, mail => Acme::MAIL.'@'.$certificate->{domain}, 'domain' => $certificate->{domain}, 'domains' => [], prod => 0);
+			# Use debian path
+			if ($debian) {
+				$replace->{cert} = Acme::DEB_CERTS.'/'.$certificate->{domain}.Acme::DEB_CERTS_SUFFIX;
+				$replace->{key} = Acme::DEB_PRIVATE.'/'.$certificate->{domain}.Acme::DEB_PRIVATE_SUFFIX;
+			}
+
+			# Fix cert entry
+			$replace->{cert} = $certificate->{cert} if (defined($certificate->{cert}));
+
+			# Fix key entry
+			$replace->{key} = $certificate->{key} if (defined($certificate->{key}));
+
+			# Fix account entry
+			$replace->{account} = $certificate->{account} if (defined($certificate->{account}));
+
+			# Fix mail entry
+			$replace->{mail} = $certificate->{mail} if (defined($certificate->{mail}));
+
+			# Fix domains entry
+			$replace->{domains} = $certificate->{domains} if (defined($certificate->{domains}) and ref($certificate->{domains}) eq 'ARRAY');
+
+			# Fix prod entry
+			$replace->{prod} = $certificate->{prod} if (defined($certificate->{prod}));
+
+			# Replace certificate
+			${$config->{certificates}}[$i] = $replace;
+		}
+	}
+
+	# Check that domains are present in config
+	map {
+		# Extract domain and domains
+		my ($domain, $domains) = split(/=/, $_);
+
+		# Transform domains
+		my @domains = defined($domains) ? map { $_ ? $_ : (); } split(/,/, $domains) : ();
+
+		# Check that domain
+		map {
+			my $tld;
+
+			# Extract tld
+			unless (($tld) = $_ =~ m/\.(\w+)$/) {
+				confess('Extract '.$_.' tld failed');
+			}
+
+			# Check if tld exists
+			unless(Net::Domain::TLD::tld_exists($tld)) {
+				confess('Extracted '.$_.' tld '.$tld.' do not exists');
+			}
+
+			# Search a record
+			my $a = Net::DNS::Resolver->new->search($_, 'A', 'IN');
+
+			# Search aaaa record
+			my $aaaa = Net::DNS::Resolver->new->search($_, 'AAAA', 'IN');
+
+			# Trigger error for unresolvable domain
+			unless (
+				# Check if either has a A or AAAA record
+				scalar map {
+					($_->type eq 'A' or $_->type eq 'AAAA') ? 1 : ();
+				}
+				# Merge both answer
+				(
+					(defined $a and defined $a->answer) ? $a->answer : (),
+					(defined $aaaa and defined $aaaa->answer) ? $aaaa->answer : ()
+				)
+			) {
+				confess('Resolve '.$_.' to an A or AAAA record failed');
+			}
+		} ($domain, @domains);
+
+		# Insert domain when missing
+		unless (scalar map { $_->{domain} eq $domain ? 1 : (); } @{$config->{certificates}}) {
+			# Init certificate
+			my $certificate = undef;
+
+			# Tie certificate
+			#XXX: tie to Tie::IxHash to keep a stable ordering of hash keys
+			tie(%{$certificate}, 'Tie::IxHash', cert => undef, key => undef, account => Acme::ACCOUNT, mail => Acme::MAIL.'@'.$domain, 'domain' => $domain, 'domains' => [], prod => 0);
+
+			# Use debian path
+			if ($debian) {
+				$certificate->{cert} = Acme::DEB_CERTS.'/'.$domain.Acme::DEB_CERTS_SUFFIX;
+				$certificate->{key} = Acme::DEB_PRIVATE.'/'.$domain.Acme::DEB_PRIVATE_SUFFIX;
+			# Use redhat path
+			} else {
+				$certificate->{cert} = Acme::RH_CERTS.'/'.$domain.Acme::RH_SUFFIX;
+				$certificate->{key} = Acme::RH_PRIVATE.'/'.$domain.Acme::RH_SUFFIX;
+			}
+
+			# Add domains
+			map {
+				# Set subdomain
+				my $subdomain = $_;
+
+				# Check if already present
+				unless (scalar map { $_ eq $subdomain ? 1 : (); } @{$certificate->{domains}}) {
+					# Add when not already present
+					${$certificate->{domains}}[scalar @{$certificate->{domains}}] = $_;
+				}
+			} @domains;
+
+			# Append certificate
+			${$config->{certificates}}[scalar @{$config->{certificates}}] = $certificate;
+		# Update domains when present
+		} else {
+			# Loop on all certificate
+			map {
+				# Check that we are on the right domain
+				if ($_->{domain} eq $domain) {
+					# Init certificate
+					my $certificate = $_;
+
+					# Reset domains
+					@{$certificate->{domains}} = ();
+
+					# Add domains
+					map {
+						# Set subdomain
+						my $subdomain = $_;
+
+						# Check if already present
+						unless (scalar map { $_ eq $subdomain ? 1 : (); } @{$certificate->{domains}}) {
+							# Add when not already present
+							${$certificate->{domains}}[scalar @{$certificate->{domains}}] = $_;
+						}
+					} @domains;
+				}
+			} @{$config->{certificates}};
+		}
+	} @ARGV;
+
+	# Extract config directory and filename
+	my ($vol, $dir, $file) = File::Spec->splitpath($configFilename);
+
+	# Check dir
+	unless ($dir) {
+		# Set as current dir if empty
+		$dir = File::Spec->curdir();
+	}
+
+	# Backup old config if possible
+	if (-w $dir and -f $configFilename) {
+		my ($dt, $suffix) = undef;
+
+		# Extract datetime suffix
+		$suffix = ($dt = DateTime->from_epoch(epoch => stat($configFilename)->mtime))->ymd('').$dt->hms('');
+
+		# Rename old config
+		unless(copy($configFilename, $configFilename.'.'.$suffix)) {
+			carp('Copy '.$configFilename.' to '.$configFilename.'.'.$suffix.' failed: '.$!);
+		}
+	# Check that directory is writable
+	} elsif (! -w $dir and -f $configFilename) {
+		confess('Config directory '.$dir.' must be writable: '.$!);
+	}
+
+	# Encode config in json
+	#XXX: emulate a tab indent file by replacing 3 space indent with tab
+	($content = $js->encode($config)) =~ s/(\G|^)\s{3}/\t/gm;
+
+	# Write to file
+	write_file($configFilename, $content);
+
+	# Exit with success
+	exit EXIT_FAILURE;
+# Check if cert or cron action
+} elsif ($action eq 'cert' or $action eq 'cron') {
+	# Validate config
+	unless (
+		#XXX: use eval to workaround a fatal in decode_json
+		eval {
+			# Check file
+			(-f $configFilename) and
+			# Read it
+			($content = read_file($configFilename)) and
+			# Decode it
+			($config = decode_json($content)) and
+			# Check certificates presence
+			defined($config->{certificates}) and
+			# Check certificates type
+			ref($config->{certificates}) eq 'ARRAY' and
+			# Check thumbprint presence
+			defined($config->{thumbprint}) and
+			# Check term presence
+			defined($config->{term}) and
+			# Check pending presence
+			defined($config->{pending}) and
+			# Check certificates array
+			! scalar map {
+				unless(
+					defined($_->{cert}) and
+					defined($_->{key}) and
+					defined($_->{account}) and
+					defined($_->{mail}) and
+					defined($_->{domain}) and
+					defined($_->{domains}) and ref($_->{domains}) eq 'ARRAY' and
+					defined($_->{prod})
+				) {
+					1;
+				} else {
+					();
+				}
+			} @{$config->{certificates}}
+		}
+	) {
+		confess('Config file '.$configFilename.' not readable or invalid: '.$!);
+	}
+# Unknown action
+} else {
+	#TODO: implement the new action
+	confess('Unknown '.$action.' action');
+}
+
+# Deal with specified domains
+if (scalar(@ARGV) > 0) {
+	# Check that domains are present in config
+	foreach my $domain (@ARGV) {
+		my $found = undef;
+		foreach my $certificate (@{$config->{certificates}}) {
+			if ($certificate->{domain} eq $domain) {
+				push(@domains, $certificate);
+				$found = 1;
+			}
+		}
+		unless($found) {
+			print 'Domain '.$domain.' not found in config file '.$configFilename."\n";
+			exit EXIT_FAILURE;
+		}
+	}
+# Without it
+} else {
+	# Populate domains array with available ones
+	foreach my $certificate (@{$config->{certificates}}) {
+		push(@domains, $certificate);
+	}
+}
+
+# Show conf usage
+if (scalar(@domains) < 1) {
+	print "Usage: $0 conf [-(v|-verbose)] [-(d|-debian)] [-(c|-config)[=/etc/acme/config]] example.com[=www.example.com[,ftp.example.com]] [...]\n";
+	exit EXIT_FAILURE;
+}
+
+# Deal with each domain
+foreach my $domain (@domains) {
+	# Skip certificate, in cron action, issued within the last 60 days
+	if ($action eq 'cron' and -f $domain->{cert} and stat($domain->{cert})->mtime >= (time() - 60*24*3600)) {
+		carp('Domain '.$domain->{domain}.' certificate '.$domain->{cert}.' skipped') if ($verbose);
+		next;
+	}
+	# Create new object
+	my $acme = Acme->new($verbose, $domain, {thumbprint => $config->{thumbprint}, pending => $config->{pending}, term => $config->{term}});
+
+	# Prepare environement
+	$acme->prepare();
+
+	# Generate required keys
+	$acme->genKeys();
+
+	# Directory
+	$acme->directory();
+
+	# Nonce
+	$acme->nonce();
+
+	# Account
+	$acme->account();
+
+	# Order
+	$acme->order();
+
+	# Generate csr
+	$acme->genCsr();
+
+	# Issue
+	$acme->issue();
+}
+
+# Exit with success
+exit EXIT_SUCCESS;
