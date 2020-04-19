@@ -1,0 +1,76 @@
+.\" Manpage for acme.
+.\" Contact acme@rapsys.eu to correct errors or typos.
+.TH man 1 "19 Apr 2020" "2\&.0\&.0" "acme man page"
+.SH "NAME"
+acme \- the acme certificate generator
+
+.SH "SYNOPSIS"
+\fIacme\fR <command> [\-(v|\-verbose)] [\-(c|\-config)[=/etc/acme/config]] [example.com] [...]
+
+.SH "DESCRIPTION"
+Acme is a fast and simple certificate generator using ACME v2 API.
+
+.sp
+See \fBacme-conf\fR(1) to generate configuration, then see \fBacme-cert\fR(1) to generate your certificate and eventually look at \fBacme-cron\fR(1) to setup the cron job\&.
+
+.SH "OPTIONS"
+.PP
+\-\-verbose
+.RS 4
+Produces a verbose report about the current process for the purpose of problem analysis\&.
+.RE
+.PP
+\-\-config
+.RS 4
+Use the specified configuration file\&. If the pathname is omitted, the file specified in Acme::CONFIG constant (normally /etc/acme/config) is assumed\&.
+.RE
+.PP
+\-\-debian
+.RS 4
+Use debian specific path schema in configuration file\&. If omitted, the default redhat path schema is assumed\&.
+.RE
+
+.SH "COMMANDS"
+.PP
+\fBconf\fR
+.RS 4
+Generate configuration, see \fBacme-conf\fR(1) for more details\&.
+.RE
+.PP
+\fBcert\fR
+.RS 4
+Generate certificate, see \fBacme-cert\fR(1) for more details\&.
+.RE
+.PP
+\fBcron\fR
+.RS 4
+Refresh certificate when needed, see \fBacme-cert\fR(1) for more details\&.
+.RE
+
+.SH "CONTRIBUTE"
+You may buy me a Beer, a Tea or help with Server fees with a paypal donation to the address \m[blue]\fBpaypal@rapsys\&.eu\fR\m[] or via the donation page.
+
+Don't forget to show your love for this project, feel free to report bugs to the author, issues which are security relevant should be disclosed privately first\&.
+
+Patches are welcomed and grant credit when requested\&.
+
+.SH "DONATION"
+\m[blue]\fBhttps://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=JNWGK8Z2TBHFN\fR\m[]
+
+.SH "FURTHER DOCUMENTATION"
+A formated and hyperlinked copy of the lastest ACME v2 API documentation can be viewed at \fBhttps://ietf-wg-acme\&.github\&.io/acme/draft-ietf-acme-acme\&.html\fR\&.
+
+.sp
+This Acme implementation can be used for Let's Encrypt free, automated and open certificate authority, their documentation can be viewed at \fBhttps://letsencrypt\&.org/docs/\fR\&.
+
+.SH "AUTHOR"
+Raphaël Gertz (Rapsys) <acme@rapsys\&.eu>
+
+.SH "BUGS"
+No known bugs.
+
+.SH "SEE ALSO"
+\fBacme-conf\fR(1), \fBacme-cert\fR(1), \fBacme-cron\fR(1)
+
+.SH "ACME"
+Part of the \fBacme\fR(1) suite
