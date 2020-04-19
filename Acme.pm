@@ -22,13 +22,13 @@ package Acme;
 use strict;
 use warnings;
 
-# Fix use of acl
+# Add acl support to file tests
 use filetest qw(access);
 
 # Symbol export
 use Exporter;
 our @ISA = qw(Exporter);
-our @EXPORT_OK = qw(VERSION);
+our @EXPORT_OK = qw(ACCOUNT CONFIG MAIL PENDING TERM THUMBPRINT VERSION);
 
 # Load dependancies
 use Carp qw(carp confess);
@@ -39,15 +39,20 @@ use Email::Valid;
 use File::Copy qw(copy);
 use File::Path qw(make_path);
 use File::Slurp qw(read_file write_file);
+use File::Spec qw(splitpath);
 use File::stat qw(stat);
 use File::Temp; # qw( :seekable );
 use IPC::System::Simple qw(capturex);
 use JSON qw(from_json to_json);
 use LWP;
 use MIME::Base64 qw(encode_base64url encode_base64);
-use Net::Domain::TLD;
+use Net::DNS qw();
+use Net::Domain::TLD qw(tld_exists);
 use POSIX qw(EXIT_FAILURE);
 use Tie::IxHash;
+
+# Load debug
+#use Data::Dumper;
 
 # Documentation links
 #XXX: see https://letsencrypt.github.io/acme-spec/ (probably based on https://ietf-wg-acme.github.io/acme/)
@@ -56,22 +61,46 @@ use Tie::IxHash;
 
 # Set constants
 use constant {
-	# Request certificate file name
-	REQUEST_CSR => 'request.der',
+	# Config infos
+	ACCOUNT => '/etc/acme/account.pem',
+	CONFIG => '/etc/acme/config',
+	PENDING => '/tmp/acme',
+	THUMBPRINT => '/etc/acme/thumbprint',
+	TERM => 'https://letsencrypt.org/documents/LE-SA-v1.2-November-15-2017.pdf',
+	MAIL => 'webmaster',
 
-	# rsa
+	# Certificate info
+	CSR_SUFFIX => '.der',
+
+	# Redhat infos
+	RH_CERTS => '/etc/pki/tls/certs',
+	RH_PRIVATE => '/etc/pki/tls/private',
+	RH_SUFFIX => '.pem',
+
+	# Debian infos
+	DEB_CERTS => '/etc/ssl/certs',
+	DEB_PRIVATE => '/etc/ssl/private',
+	DEB_CERTS_SUFFIX => '.crt',
+	DEB_PRIVATE_SUFFIX => '.key',
+
+	# Dns infos
+	DNS_PREFIX => '_acme-challenge.',
+	DNS_SUFFIX => '.',
+
+	# Key infos
 	KEY_TYPE => 'rsa',
-
-	# 2048|4096
 	KEY_SIZE => 4096,
 
 	# Acme infos
-	ACME_CERT => 'https://letsencrypt.org/certs/lets-encrypt-x3-cross-signed.pem',
-	ACME_DIR => 'https://acme-staging.api.letsencrypt.org/directory',
-	ACME_PROD_DIR => 'https://acme-v01.api.letsencrypt.org/directory',
+	#ACME_CERT => 'https://letsencrypt.org/certs/lets-encrypt-x3-cross-signed.pem',
+	ACME_DIR => 'https://acme-staging-v02.api.letsencrypt.org/directory',
+	ACME_PROD_DIR => 'https://acme-v02.api.letsencrypt.org/directory',
 
 	# Version
-	VERSION => '1.3',
+	VERSION => '2.0.0',
+
+	# Timeout
+	TIMEOUT => 300
 };
 
 # User agent object
@@ -105,7 +134,7 @@ tie(%{$jwk{jwk}{jwk}}, 'Tie::IxHash', e => undef, kty => uc(KEY_TYPE), n => unde
 # Constructor
 sub new {
 	# Extract params
-	my ($class, $debug, $domain, $config) = @_;
+	my ($class, $verbose, $domain, $config) = @_;
 
 	# Create self hash
 	my $self = {};
@@ -113,8 +142,8 @@ sub new {
 	# Link self to package
 	bless($self, $class);
 
-	# Save debug
-	$self->{debug} = $debug;
+	# Save verbose
+	$self->{verbose} = $verbose;
 
 	# Save domain
 	$self->{domain} = $domain;
@@ -123,23 +152,30 @@ sub new {
 	$self->{config} = $config;
 
 	# Save domains
-	@{$self->{domains}} = ($domain->{domain}, @{$domain->{domains}});
+	my @domains = ($domain->{domain}, @{$domain->{domains}});
+
+	# Show error if check fail
+	unless (defined $self->{domain}{mail}) {
+		confess('Missing mail');
+	}
+
+	# Transform mail in an array
+	unless (ref($self->{domain}{mail}) eq 'ARRAY') {
+		$self->{domain}{mail} = [ $self->{domain}{mail} ];
+	}
 
 	# Add extra check to mail validity
 	#XXX: mxcheck fail if there is only a A record on the domain
 	my $ev = Email::Valid->new(-fqdn => 1, -tldcheck => 1, -mxcheck => 1);
 
-	# Show error if check fail
-	if (! defined $ev->address($self->{domain}{mail})) {
-		map { carp 'failed check: '.$_ if ($self->{debug}) } $ev->details();
-		confess 'Email::Valid->address failed';
-	}
-
-	# Save mail
-	$self->{mail} = $self->{domain}{mail};
-
-	# Create resolver
-	my $res = new Net::DNS::Resolver();
+	# Loop on each mail
+	map {
+		# Checke address
+		if (! defined $ev->address($_)) {
+			map { carp 'failed check: '.$_ if ($self->{verbose}) } $ev->details();
+			confess('Validate '.$_.' mail address failed');
+		}
+	} @{$self->{domain}{mail}};
 
 	# Check domains
 	map {
@@ -147,24 +183,35 @@ sub new {
 
 		# Extract tld
 		unless (($tld) = $_ =~ m/\.(\w+)$/) {
-			confess $_.'\'s tld extraction failed';
+			confess('Extract '.$_.' tld failed');
 		}
 
 		# Check if tld exists
 		unless(Net::Domain::TLD::tld_exists($tld)) {
-			confess $tld.' tld from '.$_.' don\'t exists';
+			confess('Extracted '.$_.' tld '.$tld.' do not exists');
 		}
 
-		# Check if we get dns answer
-		#XXX: only search A type because letsencrypt don't support ipv6 (AAAA) yet
-		unless(my $rep = $res->search($_, 'A')) {
-			confess 'search A record for '.$_.' failed';
-		} else {
-			unless (scalar map { $_->type eq 'A' ? 1 : (); } $rep->answer) {
-				confess 'search recursively A record for '.$_.' failed';
+		# Search a record
+		my $a = Net::DNS::Resolver->new->search($_, 'A', 'IN');
+
+		# Search aaaa record
+		my $aaaa = Net::DNS::Resolver->new->search($_, 'AAAA', 'IN');
+
+		# Trigger error for unresolvable domain
+		unless (
+			# Check if either has a A or AAAA record
+			scalar map {
+				($_->type eq 'A' or $_->type eq 'AAAA') ? 1 : ();
 			}
+			# Merge both answer
+			(
+				(defined $a and defined $a->answer) ? $a->answer : (),
+				(defined $aaaa and defined $aaaa->answer) ? $aaaa->answer : ()
+			)
+		) {
+			confess('Resolve '.$_.' to an A or AAAA record failed');
 		}
-	} @{$self->{domains}};
+	} @domains;
 
 	# Return class reference
 	return $self;
@@ -185,13 +232,13 @@ sub prepare {
 
 	# Create all paths
 	{
-		make_path($certDir, $keyDir, $accountDir, $self->{config}{pending}.'/'.$self->{mail}.'.'.($self->{domain}{prod} ? 'prod' : 'staging'), {error => \my $err});
+		make_path($certDir, $keyDir, $accountDir, $self->{config}{pending}, {error => \my $err});
 		if (@$err) {
 			map {
-				my ($file, $msg) = %$_;
-				carp ($file eq '' ? '' : $file.': ').$msg if ($self->{debug});
+				my ($file, $msg) = %{$_};
+				carp 'Mkdir '.($file ? $file.' ' : '').'failed: '.$msg if ($self->{verbose});
 			} @$err;
-			confess 'make_path failed';
+			confess('Make path failed');
 		}
 	}
 
@@ -204,12 +251,12 @@ sub prepare {
 		confess('Directory '.$certDir.' or file '.$self->{domain}{cert}.' must be writable: '.$!);
 	}
 
-	# Check that key is writable
+	# Check that key is readable or parent directory is writable
 	unless (-r $self->{domain}{key} || -w $keyDir) {
 		confess('File '.$self->{domain}{key}.' must be readable or directory '.$keyDir.' must be writable: '.$!);
 	}
 
-	# Check that account is writable
+	# Check that account key is readable or parent directory is writable
 	unless (-r $self->{domain}{account} || -w $accountDir) {
 		confess('File '.$self->{domain}{account}.' must be readable or directory '.$accountDir.' must be writable: '.$!);
 	}
@@ -265,7 +312,7 @@ sub genKeys {
 	} ($self->{domain}{account}, $self->{domain}{key});
 
 	# Extract modulus and publicExponent jwk
-	#XXX: same here we tie to keep ordering
+	#XXX: tie to Tie::IxHash to keep a stable ordering of hash keys
 	tie(%{$self->{account}}, 'Tie::IxHash', %jwk);
 	map {
 		if (/^Modulus=([0-9A-F]+)$/) {
@@ -289,33 +336,6 @@ sub genKeys {
 	$self->{account}{thumbprint} = (sha256_base64(to_json($self->{account}{jwk}{jwk})) =~ s/=+\z//r) =~ tr[+/][-_]r;
 }
 
-# Generate certificate request
-sub genCsr {
-	my ($self) = @_;
-
-	# Openssl config template
-	my $oct = File::Temp->new();
-
-	# Save data start position
-	my $pos = tell DATA;
-
-	# Load template from data
-	map { s/__EMAIL_ADDRESS__/$self->{mail}/; s/__COMMON_NAME__/$self->{domains}[0]/; print $oct $_; } <DATA>;
-
-	# Reseek data
-	seek(DATA, $pos, 0);
-
-	# Append domain names
-	my $i = 1;
-	map { print $oct 'DNS.'.$i++.' = '.$_."\n"; } @{$self->{domains}};
-
-	# Generate csr
-	capturex('openssl', ('req', '-new', '-outform', 'DER', '-key', $self->{domain}{key}, '-config', $oct->filename, '-out', $self->{config}{pending}.'/'.$self->{mail}.'.'.($self->{domain}{prod} ? 'prod' : 'staging').'/'.REQUEST_CSR));
-
-	# Close oct
-	close($oct);
-}
-
 # Directory call
 sub directory {
 	my ($self) = @_;
@@ -334,25 +354,74 @@ sub directory {
 
 	# Handle error
 	unless ($res->is_success) {
-		confess 'GET '.$dir.'?'.$time.' failed: '.$res->status_line;
+		confess('GET '.$dir.'?'.$time.' failed: '.$res->status_line);
+	}
+
+	# Init content
+	my %content;
+
+	# Extract content
+	unless (%content = %{from_json($res->content)}) {
+		confess('GET '.$dir.'?'.$time.' from_json failed: '.$res->status_line);
+	}
+
+	# Merge uris in self content
+	$self->{req}{dir} = $dir;
+	$self->{req}{keyChange} = $content{keyChange};
+	$self->{req}{newNonce} = $content{newNonce};
+	$self->{req}{newAccount} = $content{newAccount};
+	$self->{req}{revokeCert} = $content{revokeCert};
+	$self->{req}{newOrder} = $content{newOrder};
+
+	# Check term
+	unless ($self->{config}{term} eq $content{meta}{termsOfService}) {
+		confess('GET '.$dir.'?'.$time.' term: '.$content{meta}{termsOfService}.' differ from config: '.$self->{config}{term});
+	}
+}
+
+# Nonce call
+sub nonce {
+	my ($self) = @_;
+
+	# Set time
+	my $time = time;
+
+	# Create a request
+	my $req = HTTP::Request->new(HEAD => $self->{req}{newNonce}.'?'.$time);
+
+	# Get request
+	my $res = $ua->request($req);
+
+	# Handle error
+	unless ($res->is_success) {
+		confess('HEAD '.$self->{req}{newNonce}.'?'.$time.' failed: '.$res->status_line);
 	}
 
 	# Save nonce
-	$self->{nonce} = $res->headers->{'replay-nonce'};
-
-	# Merge uris in self content
-	%$self = (%$self, %{from_json($res->content)});
+	$self->{req}{nonce} = $res->headers->{'replay-nonce'};
 }
 
 # Post request
 sub _post {
 	my ($self, $uri, $payload) = @_;
 
-	# Protected field
-	my $protected = encode_base64url(to_json({nonce => $self->{nonce}}));
+	# Init protected
+	#XXX: tie to Tie::IxHash to keep a stable ordering of hash keys
+	#XXX: strict ordering only really needed here for thumbprint sha256 digest
+	tie(my %protected, 'Tie::IxHash', alg => $self->{account}{jwk}{alg}, jwk => $self->{account}{jwk}{jwk}, nonce => $self->{req}{nonce}, url => $uri);
 
-	# Payload field
-	$payload = encode_base64url(to_json($payload));
+	# We have a kid
+	if (defined($self->{req}{kid})) {
+		# Replace jwk entry with it
+		#XXX: when kid is available all request with jwk are rejected by the api
+		%protected = (alg => $self->{account}{jwk}{alg}, kid => $self->{req}{kid}, nonce => $self->{req}{nonce}, url => $uri);
+	}
+
+	# Encode protected
+	my $protected = encode_base64url(to_json(\%protected));
+
+	# Encode payload
+	$payload = encode_base64url(to_json($payload)) unless ($payload eq '');
 
 	# Sign temp file
 	my $stf = File::Temp->new();
@@ -368,10 +437,12 @@ sub _post {
 
 	# Create a request
 	my $req = HTTP::Request->new(POST => $uri);
-	
+
+	# Set request header
+	$req->header('Content-Type' => 'application/jose+json');
+
 	# Set new-reg request content
 	$req->content(to_json({
-		header => $self->{account}{jwk},
 		protected => $protected,
 		payload => $payload,
 		signature => $signature
@@ -382,7 +453,7 @@ sub _post {
 
 	# Save nonce
 	if (defined $res->headers->{'replay-nonce'}) {
-		$self->{nonce} = $res->headers->{'replay-nonce'};
+		$self->{req}{nonce} = $res->headers->{'replay-nonce'};
 	}
 
 	# Return res object
@@ -397,23 +468,31 @@ sub _dnsCheck {
 	# Generate signature from content
 	my $signature = ((sha256_base64($token.'.'.$self->{account}{thumbprint})) =~ s/=+\z//r) =~ tr[+/][-_]r;
 
-	# Fix domain
-	$domain = '_acme-challenge.'.$domain.'.';
+	# Search txt record
+	my $txt = Net::DNS::Resolver->new->search(DNS_PREFIX.$domain.DNS_SUFFIX, 'TXT', 'IN');
 
-	# Create resolver
-	my $res = new Net::DNS::Resolver();
-
-	# Check if we get dns answer
-	unless(my $rep = $res->search($domain, 'TXT')) {
-		carp 'TXT record search for '.$domain.' failed' if ($self->{debug});
+	# Check that we have a txt record
+	unless (defined $txt and defined $txt->answer and scalar map { $_->type eq 'TXT' ? 1 : (); } $txt->answer) {
+		carp 'Resolve '.DNS_PREFIX.$domain.DNS_SUFFIX.' to a TXT record failed' if ($self->{verbose});
 		return;
-	} else {
-		unless (scalar map { $_->type eq 'TXT' && $_->txtdata =~ /^$signature$/ ? 1 : (); } $rep->answer) {
-			carp 'TXT record recursive search for '.$domain.' failed' if ($self->{debug});
-			return;
-		}
 	}
 
+	# Check that txt record data match signature
+	unless (scalar map { ($_->type eq 'TXT' and $_->txtdata eq $signature) ? 1 : (); } $txt->answer) {
+		# Check verbose
+		if ($self->{verbose}) {
+			# Loop on each answer
+			map {
+				# Check if we have a TXT record with different value
+				if ($_->type eq 'TXT' and $_->txtdata ne $signature) {
+					carp 'Resolved '.DNS_PREFIX.$domain.DNS_SUFFIX.' with "'.$_->txtdata.'" instead of "'.$signature.'"';
+				}
+			} $txt->answer;
+		}
+		return;
+	}
+
+	# Return success
 	return 1;
 }
 
@@ -435,13 +514,13 @@ sub _httpCheck {
 
 	# Handle error
 	unless ($res->is_success) {
-		carp 'GET http://'.$domain.'/.well-known/acme-challenge/'.$token.' failed: '.$res->status_line if ($self->{debug});
+		carp 'Fetch http://'.$domain.'/.well-known/acme-challenge/'.$token.' failed: '.$res->status_line if ($self->{verbose});
 		return;
 	}
 
 	# Handle invalid content
 	unless($res->content =~ /^$token.$self->{account}{thumbprint}\s*$/) {
-		carp 'GET http://'.$domain.'/.well-known/acme-challenge/'.$token.' content match failed: /^'.$token.'.'.$self->{account}{thumbprint}.'\s*$/ !~ '.$res->content if ($self->{debug});
+		carp 'Fetched http://'.$domain.'/.well-known/acme-challenge/'.$token.' with "'.$res->content.'" instead of "'.$token.'.'.$self->{account}{thumbprint}.'"' if ($self->{verbose});
 		return;
 	}
 
@@ -451,51 +530,160 @@ sub _httpCheck {
 
 # Register account
 #XXX: see doc at https://ietf-wg-acme.github.io/acme/#rfc.section.6.3
-sub register {
+sub account {
 	my ($self) = @_;
 
-	# Post new-reg request
-	#XXX: contact array may contain a tel:+33612345678 for example
-	my $res = $self->_post($self->{'new-reg'}, {resource => 'new-reg', contact => ['mailto:'.$self->{mail}], agreement => $self->{term}});
+	# Init pending directory
+	$self->{req}{pending} = $self->{config}{pending}.'/'.encode_base64url($self->{req}{dir}).'/'.encode_base64url(join(',', @{$self->{domain}{mail}}));
 
-	# Handle error
-	unless ($res->is_success || $res->code eq 409) {
-		confess 'POST '.$self->{'new-reg'}.' failed: '.$res->status_line;
+	# Create pending directory
+	{
+		make_path($self->{req}{pending}, {error => \my $err});
+		if (@$err) {
+			map {
+				my ($file, $msg) = %{$_};
+				carp 'Mkdir '.($file ? $file.' ' : '').'failed: '.$msg if ($self->{verbose});
+			} @$err;
+			confess('Make path failed');
+		}
 	}
 
-	# Update mail informations
-	if ($res->code eq 409) {
-		# Save registration uri
-		$self->{'reg'} = $res->headers->{location};
+	# Init file
+	#XXX: we use this file to store the fetched account
+	my $file = $self->{req}{pending}.'/'.(((sha256_base64(join(',', @{$self->{domain}{mail}}))) =~ s/=+\z//r) =~ tr[+/][-_]r);
 
-		# Post reg request
-		#XXX: contact array may contain a tel:+33612345678 for example
-		$res = $self->_post($self->{'reg'}, {resource => 'reg', contact => ['mailto:'.$self->{mail}]});
+	# Init content
+	my $content = undef;
+
+	# Load account content or post a new one
+	if (
+		#XXX: use eval to workaround a fatal in from_json
+		! defined eval {
+			# Check that file exists
+			-f $file &&
+			# Read it
+			($content = read_file($file)) &&
+			# Decode it
+			($content = from_json($content))
+		}
+	) {
+		# Init tied payload
+		#XXX: tie to Tie::IxHash to keep a stable ordering of hash keys
+		tie(my %payload, 'Tie::IxHash', termsOfServiceAgreed => JSON::true, contact => []);
+
+		# Loop on mails
+		map {
+			# Append mail to payload
+			$payload{contact}[scalar @{$payload{contact}}] = 'mailto:'.$_;
+		} @{$self->{domain}{mail}};
+
+		# Post newAccount request
+		# TODO: change contact field in config to contain directly the array [mailto:example@example.com,...] ???
+		#XXX: contact array may contain a tel:+33612345678 for example (supported ???)
+		my $res = $self->_post($self->{req}{'newAccount'}, \%payload);
 
 		# Handle error
 		unless ($res->is_success) {
-			confess 'POST '.$self->{'reg'}.' failed: '.$res->status_line;
+			confess('POST '.$self->{req}{'newAccount'}.' failed: '.$res->status_line)
 		}
+
+		# Store kid from header location
+		$content = {
+			'kid' => $res->headers->{location},
+		};
+
+		# Write to file
+		write_file($file, to_json($content));
 	}
+
+	# Set kid from content
+	$self->{req}{kid} = $content->{kid};
+
 }
 
 # Authorize domains
-sub authorize {
+sub order {
 	my ($self) = @_;
 
+	# Init file
+	#XXX: we use this file to store the requested domains on our side
+	#XXX: see bug https://github.com/letsencrypt/boulder/issues/3335 and https://community.letsencrypt.org/t/acmev2-orders-list/51662
+	my $file = $self->{req}{pending}.'/'.(((sha256_base64(join(',', ($self->{domain}{domain}, @{$self->{domain}{domains}})))) =~ s/=+\z//r) =~ tr[+/][-_]r);
+
+	# Init content
+	my $content = undef;
+
+	# Load account content or post a new one
+	if (
+		#XXX: use eval to workaround a fatal in from_json
+		! defined eval {
+			# Check that file exists
+			-f $file &&
+			# Read it
+			($content = read_file($file)) &&
+			# Decode it
+			($content = from_json($content))
+		# Check expiration
+		} || (str2time($content->{expires}) <= time()+3600)
+	) {
+		# Init tied payload
+		#XXX: tie to Tie::IxHash to keep a stable ordering of hash keys
+		#XXX: https://www.perlmonks.org/?node_id=1215976
+		#XXX: optional notBefore, notAfter, see https://ietf-wg-acme.github.io/acme/draft-ietf-acme-acme.html#applying-for-certificate-issuance
+		tie(my %payload, 'Tie::IxHash', identifiers => []);
+
+		# Loop on domains
+		map {
+			# Tie in a stable hash and append to identifiers array
+			#XXX: tie to Tie::IxHash to keep a stable ordering of hash keys
+			tie(%{$payload{identifiers}[scalar @{$payload{identifiers}}]}, 'Tie::IxHash', type => 'dns', value => $_);
+		} ($self->{domain}{domain}, @{$self->{domain}{domains}});
+
+		# Post new order request
+		my $res = $self->_post($self->{req}{'newOrder'}, \%payload);
+
+		# Handle error
+		unless ($res->is_success) {
+			confess('POST '.$self->{req}{'newOrder'}.' failed: '.$res->status_line);
+		}
+
+		# Handle error
+		unless ($res->content) {
+			confess('POST '.$self->{req}{'newOrder'}.' empty content: '.$res->status_line);
+		}
+
+		# Handle error
+		unless ($res->headers->{location}) {
+			confess('POST '.$self->{req}{'newOrder'}.' missing location: '.$res->status_line);
+		}
+
+		# Extract content
+		$content = from_json($res->content);
+
+		# Write to file
+		write_file($file, to_json($content));
+	}
+
+	# Save the authorizations
+	$self->{req}{authorizations} = [ keys %{{ map { $_ => undef } @{$content->{authorizations}} }} ];
+
+	# Save the finalize uri
+	$self->{req}{finalize} = $content->{finalize};
+
 	# Create challenges hash
-	%{$self->{challenges}} = ();
+	%{$self->{req}{challenges}} = ();
 
-	# Pending list
-	my @pending = ();
-
-	# Create or load auth request for each domain
+	# Extract authorizations
 	map {
+		# Init uri
+		my $uri = $_;
+
 		# Init content
 		my $content = undef;
 
 		# Init file
-		my $file = $self->{config}{pending}.'/'.$self->{mail}.'.'.($self->{domain}{prod} ? 'prod' : 'staging').'/'.$_;
+		#XXX: tmpdir.'/'.<orderuri>.'/'.<authuri>
+		my $file = $self->{req}{pending}.'/'.encode_base64url($uri);
 
 		# Load auth request content or post a new one
 		#TODO: add more check on cache file ???
@@ -512,24 +700,35 @@ sub authorize {
 			} || (str2time($content->{expires}) <= time()+3600)
 		) {
 			# Post new-authz request
-			my $res = $self->_post($self->{'new-authz'}, {resource => 'new-authz', identifier => {type => 'dns', value => $_}, existing => 'accept'});
+			my $res = $self->_post($uri, '');
 
 			# Handle error
 			unless ($res->is_success) {
-				confess 'POST '.$self->{'new-authz'}.' for '.$_.' failed: '.$res->status_line;
+				confess('POST '.$uri.' failed: '.$res->status_line);
 			}
 
 			# Decode content
 			$content = from_json($res->content);
 
-			# Check domain
-			unless (defined $content->{identifier}{value} && $content->{identifier}{value} eq $_) {
-				confess 'domain matching '.$content->{identifier}{value}.' for '.$_.' failed: '.$res->status_line;
+			# Check identifier
+			unless (
+				defined $content->{identifier} and
+				defined $content->{identifier}{type} and
+				defined $content->{identifier}{value}
+			) {
+				confess('POST '.$uri.' missing identifier: '.$res->status_line);
+			} else {
+				unless (
+					$content->{identifier}{type} eq 'dns' and
+					$content->{identifier}{value}
+				) {
+					confess('POST '.$uri.' invalid identifier: '.$res->status_line);
+				}
 			}
 
 			# Check status
 			unless ($content->{status} eq 'valid' or $content->{status} eq 'pending') {
-				confess 'POST '.$self->{'new-authz'}.' for '.$_.' failed: '.$res->status_line;
+				confess('POST '.$uri.' for '.$content->{identifier}{value}.' failed: '.$res->status_line);
 			}
 
 			# Write to file
@@ -537,105 +736,162 @@ sub authorize {
 		}
 
 		# Add challenge
-		%{$self->{challenges}{$_}} = (
+		%{$self->{req}{challenges}{$content->{identifier}{value}}} = (
 			status => $content->{status},
 			expires => $content->{expires},
-			polls => []
+			challenges => {},
+			polls => {}
 		);
 
-		# Save pending data
-		if ($content->{status} eq 'pending') {
-			# Extract validation data
-			foreach my $challenge (@{$content->{challenges}}) {
-				# One test already validated this auth request
-				if ($self->{challenges}{$_}{status} eq 'valid') {
-					next;
-				} elsif ($challenge->{status} eq 'valid') {
-					$self->{challenges}{$_}{status} = $challenge->{status};
-					next;
-				} elsif ($challenge->{status} eq 'pending') {
-					# Handle check
-					if (
-						($challenge->{type} =~ /^http-01$/ and $self->_httpCheck($_, $challenge->{token})) or
-						($challenge->{type} =~ /^dns-01$/ and $self->_dnsCheck($_, $challenge->{token}))
-					) {
-						# Post challenge request
-						my $res = $self->_post($challenge->{uri}, {resource => 'challenge', keyAuthorization => $challenge->{token}.'.'.$self->{account}{thumbprint}});
-
-						# Handle error
-						unless ($res->is_success) {
-							confess 'POST '.$challenge->{uri}.' failed: '.$res->status_line;
-						}
-
-						# Extract content
-						my $content = from_json($res->content);
-
-						# Save if valid
-						if ($content->{status} eq 'valid') {
-							$self->{challenges}{$_}{status} = $content->{status};
-						# Check is still polling
-						} elsif ($content->{status} eq 'pending') {
-							# Add to poll list for later use
-							push(@{$self->{challenges}{$_}{polls}}, {
-								type => (split(/-/, $challenge->{type}))[0],
-								status => $content->{status},
-								poll => $content->{uri}
-							});
-						}
-					}
-				}
+		# Extract challenges
+		map {
+			# Save if valid
+			if ($_->{status} eq 'valid') {
+				$self->{req}{challenges}{$content->{identifier}{value}}{status} = $_->{status};
+			# Check is still polling
+			} elsif ($content->{status} eq 'pending') {
+				# Add to challenges list for later use
+				$self->{req}{challenges}{$content->{identifier}{value}}{challenges}{$_->{type}} = {
+					status => $_->{status},
+					token => $_->{token},
+					url => $_->{url}
+				};
 			}
-			# Check if check is challenge still in pending and no polls
-			if ($self->{challenges}{$_}{status} eq 'pending' && scalar @{$self->{challenges}{$_}{polls}} == 0) {
-				# Loop on all remaining challenges
-				foreach my $challenge (@{$content->{challenges}}) {
-					# Display help for http-01 check
-					if ($challenge->{type} eq 'http-01') {
-						print STDERR 'Create URI http://'.$_.'/.well-known/acme-challenge/'.$challenge->{token}.' with content '.$challenge->{token}.'.'.$self->{account}{thumbprint}."\n";
-					# Display help for dns-01 check
-					} elsif ($challenge->{type} eq 'dns-01') {
-						print STDERR 'Create TXT record _acme-challenge.'.$_.'. with value '.(((sha256_base64($challenge->{token}.'.'.$self->{account}{thumbprint})) =~ s/=+\z//r) =~ tr[+/][-_]r)."\n";
+		} @{$content->{challenges}};
+
+		# Set identifier
+		my $identifier = $content->{identifier}{value};
+
+		# Save pending data
+		if ($self->{req}{challenges}{$identifier}{status} eq 'pending') {
+			# Check challenges
+			map {
+				# One test already validated this auth request
+				unless($self->{req}{challenges}{$identifier}{status} eq 'valid') {
+					# One challenge validated
+					if ($self->{req}{challenges}{$identifier}{challenges}{$_}{status} eq 'valid') {
+						$self->{req}{challenges}{$identifier}{status} = $self->{req}{challenges}{$identifier}{challenges}{$_}{status};
+					# This challenge is to be validated
+					} elsif ($self->{req}{challenges}{$identifier}{challenges}{$_}{status} eq 'pending') {
+						#TODO: implement tls-alpn-01 challenge someday if possible
+						if (
+							($_ eq 'http-01' and $self->_httpCheck($identifier, $self->{req}{challenges}{$identifier}{challenges}{$_}{token})) or
+							($_ eq 'dns-01' and $self->_dnsCheck($identifier, $self->{req}{challenges}{$identifier}{challenges}{$_}{token}))
+						) {
+							# Init file
+							#XXX: tmpdir.'/'.<orderuri>.'/'.<authuri>
+							my $file = $self->{req}{pending}.'/'.encode_base64url($self->{req}{challenges}{$identifier}{challenges}{$_}{url});
+
+							# Reset content
+							$content = undef;
+
+							# Load auth request content or post a new one
+							#TODO: add more check on cache file ???
+							if (
+								#XXX: use eval to workaround a fatal in from_json
+								! defined eval {
+									# Check that file exists
+									-f $file &&
+									# Read it
+									($content = read_file($file)) &&
+									# Decode it
+									($content = from_json($content))
+								#TODO: Check file modification time ? There is no expires field in json answer
+								}# || (str2time($content->{expires}) <= time()+3600)
+							) {
+								# Post challenge request
+								my $res = $self->_post(
+									$self->{req}{challenges}{$identifier}{challenges}{$_}{url},
+									{keyAuthorization => $self->{req}{challenges}{$identifier}{challenges}{$_}{token}.'.'.$self->{account}{thumbprint}}
+								);
+
+								# Handle error
+								unless ($res->is_success) {
+									confess('POST '.$self->{req}{challenges}{$identifier}{challenges}{$_}{url}.' failed: '.$res->status_line);
+								}
+
+								# Extract content
+								$content = from_json($res->content);
+
+								# Write to file
+								write_file($file, to_json($content));
+							}
+
+							# Save if valid
+							if ($content->{status} eq 'valid') {
+								$self->{req}{challenges}{$identifier}{status} = $content->{status};
+							# Check is still polling
+							} elsif ($content->{status} eq 'pending') {
+								# Add to poll list for later use
+								$self->{req}{challenges}{$identifier}{polls}{$content->{type}} = 1;
+							}
+						}
 					}
 				}
+			} keys %{$self->{req}{challenges}{$identifier}{challenges}};
+
+			# Check if check is challenge still in pending and no polls
+			if ($self->{req}{challenges}{$identifier}{status} eq 'pending' && scalar keys %{$self->{req}{challenges}{$identifier}{polls}} == 0) {
+				# Loop on all remaining challenges
+				map {
+					#TODO: implement tls-alpn-01 challenge someday if possible
+					# Display help for http-01 check
+					if ($_ eq 'http-01') {
+						print STDERR 'Require URI http://'.$identifier.'/.well-known/acme-challenge/'.$self->{req}{challenges}{$identifier}{challenges}{$_}{token}.' with "'.$self->{req}{challenges}{$identifier}{challenges}{$_}{token}.'.'.$self->{account}{thumbprint}.'"'."\n";
+					# Display help for dns-01 check
+					} elsif ($_ eq 'dns-01') {
+						print STDERR 'Require TXT record _acme-challenge.'.$identifier.'. with "'.(((sha256_base64($self->{req}{challenges}{$identifier}{challenges}{$_}{token}.'.'.$self->{account}{thumbprint})) =~ s/=+\z//r) =~ tr[+/][-_]r).'"'."\n";
+					}
+				} keys %{$self->{req}{challenges}{$identifier}{challenges}};
 			}
 		}
-	} @{$self->{domains}};
+	} @{$self->{req}{authorizations}};
 
 	# Init max run
-	my $remaining = 300;
+	my $remaining = TIMEOUT;
 
 	# Poll pending
-	while (--$remaining >= 0 and scalar map { $_->{status} eq 'pending' ? 1 : (); } values %{$self->{challenges}}) {
+	while (--$remaining >= 0 and scalar map { ($_->{status} eq 'pending' and scalar keys %{$_->{polls}}) ? 1 : (); } values %{$self->{req}{challenges}}) {
 		# Sleep
 		sleep(1);
+
 		# Poll remaining pending
 		map {
-			# Init domain
-			my $domain = $_;
+			# Init identifier
+			my $identifier = $_;
 
 			# Poll remaining polls
 			map {
-				# Create a request
-				my $req = HTTP::Request->new(GET => $_->{poll});
-
-				# Get request
-				my $res = $ua->request($req);
+				# Post challenge request
+				#XXX: no cache here we force update
+				my $res = $self->_post(
+					$self->{req}{challenges}{$identifier}{challenges}{$_}{url},
+					{keyAuthorization => $self->{req}{challenges}{$identifier}{challenges}{$_}{token}.'.'.$self->{account}{thumbprint}}
+				);
 
 				# Handle error
 				unless ($res->is_success) {
-					carp 'GET '.$self->{challenges}{$_}{http_challenge}.' failed: '.$res->status_line if ($self->{debug});
+					confess('POST '.$self->{req}{challenges}{$identifier}{challenges}{$_}{url}.' failed: '.$res->status_line);
 				}
 
 				# Extract content
-				my $content = from_json($res->content);
+				$content = from_json($res->content);
+
+				# Init file
+				#XXX: tmpdir.'/'.<orderuri>.'/'.<authuri>
+				my $file = $self->{req}{pending}.'/'.encode_base64url($self->{req}{challenges}{$identifier}{challenges}{$_}{url});
+
+				# Write to file
+				write_file($file, to_json($content));
 
 				# Save status
 				if ($content->{status} ne 'pending') {
-					$self->{challenges}{$domain}{status} = $content->{status};
+					$self->{req}{challenges}{$identifier}{status} = $content->{status};
 				}
-			} @{$self->{challenges}{$_}{polls}};
-		} map { $self->{challenges}{$_}{status} eq 'pending' ? $_ : (); } keys %{$self->{challenges}};
+			} keys %{$self->{req}{challenges}{$identifier}{polls}};
+		} map { $self->{req}{challenges}{$_}{status} eq 'pending' ? $_ : (); } keys %{$self->{req}{challenges}};
 	} 
+
 
 	# Check if thumbprint is writeable
 	if (-w $self->{config}{thumbprint}) {
@@ -643,26 +899,67 @@ sub authorize {
 		write_file($self->{config}{thumbprint}, '');
 	}
 
-	# Stop here with remaining chanllenge
-	if (scalar map { ! defined $_->{status} or $_->{status} ne 'valid' ? 1 : (); } values %{$self->{challenges}}) {
-		# Deactivate all activated domains 
-		#XXX: not implemented by letsencrypt
+	# Stop here with remaining challenge
+	if (scalar map { $_->{status} ne 'valid' ? 1 : (); } values %{$self->{req}{challenges}}) {
+		#TODO: Deactivate all activated domains ?
+		#XXX: see if implemented by letsencrypt ACMEv2
 		#map {
 		#	# Post deactivation request
 		#	my $res = $self->_post($self->{challenges}{$_}{http_uri}, {resource => 'authz', status => 'deactivated'});
 		#	# Handle error
 		#	unless ($res->is_success) {
-		#		confess 'POST '.$self->{challenges}{$_}{http_uri}.' failed: '.$res->status_line;
+		#		confess('POST '.$self->{challenges}{$_}{http_uri}.' failed: '.$res->status_line);
 		#	}
 		#} map { $self->{challenges}{$_}{status} eq 'valid' ? $_ : () } keys %{$self->{challenges}};
 
 		# Stop here as a domain of csr list failed authorization
-		if ($self->{debug}) {
-			my @domains = map { ! defined $self->{challenges}{$_}{status} or $self->{challenges}{$_}{status} ne 'valid' ? $_ : (); } keys %{$self->{challenges}};
-			confess 'Fix the challenge'.(scalar @domains > 1?'s':'').' for domain'.(scalar @domains > 1?'s':'').': '.join(', ', @domains);
-		} else {
-			exit EXIT_FAILURE;
+		if ($self->{verbose}) {
+			my @domains = map { $self->{req}{challenges}{$_}{status} ne 'valid' ? $_ : (); } keys %{$self->{req}{challenges}};
+			#my @domains = map { ! defined $self->{challenges}{$_}{status} or $self->{challenges}{$_}{status} ne 'valid' ? $_ : (); } keys %{$self->{challenges}};
+			carp 'Fix challenge'.(scalar @domains > 1?'s':'').' for: '.join(', ', @domains);
 		}
+		exit EXIT_FAILURE;
+	}
+}
+
+# Generate certificate request
+sub genCsr {
+	my ($self) = @_;
+
+	# Init csr file
+	#XXX: tmpdir.'/'.<orderuri>.'/'.<thumbprint>.':'.<mail>.':'.join(',', @domains).'.<prodstaging>.'.CSR_SUFFIX
+	$self->{req}{csr} = $self->{req}{pending}.'/'.(((sha256_base64(join(',', ($self->{domain}{domain}, @{$self->{domain}{domains}})))) =~ s/=+\z//r) =~ tr[+/][-_]r).CSR_SUFFIX;
+
+	# Reuse certificate request file without domain/mail change
+	if (! -f $self->{req}{csr}) {
+		# Openssl config template
+		my $oct = File::Temp->new(UNLINK => 0);
+
+		# Save data start position
+		my $pos = tell DATA;
+
+		# Init counter
+		my $i = 0;
+
+		# Prepare mail
+		my $mail = join("\n", map { $i++.'.emailAddress'."\t\t\t".'= '.$_; } @{$self->{domain}{mail}});
+
+		# Load template from data
+		map { s/__EMAIL_ADDRESS__/$mail/; s/__COMMON_NAME__/$self->{domain}{domain}/; print $oct $_; } <DATA>;
+
+		# Reseek data
+		seek(DATA, $pos, 0);
+
+		# Append domain names
+		$i = 0;
+		map { print $oct 'DNS.'.$i++.' = '.$_."\n"; } ($self->{domain}{domain}, @{$self->{domain}{domains}});
+
+		# Generate csr
+		#XXX: read certificate request with: openssl req -inform DER -in $self->{req}{csr} -text
+		capturex('openssl', ('req', '-new', '-outform', 'DER', '-key', $self->{domain}{key}, '-config', $oct->filename, '-out', $self->{req}{csr}));
+
+		# Close oct
+		close($oct);
 	}
 }
 
@@ -671,7 +968,7 @@ sub issue {
 	my ($self) = @_;
 
 	# Open csr file
-	open(my $fh, '<', $self->{config}{pending}.'/'.$self->{mail}.'.'.($self->{domain}{prod} ? 'prod' : 'staging').'/'.REQUEST_CSR) or die $!;
+	open(my $fh, '<', $self->{req}{csr}) or die $!;
 
 	# Load csr
 	my $csr = encode_base64url(join('', <$fh>) =~ s/^\0+//r);
@@ -679,39 +976,104 @@ sub issue {
 	# Close csr file
 	close($fh) or die $!;
 
-	# Post certificate request
-	my $res = $self->_post($self->{'new-cert'}, {resource => 'new-cert', csr => $csr});
+	# Init file
+	#XXX: tmpdir.'/'.<orderuri>.'/'.<finalizeuri>
+	my $file = $self->{req}{pending}.'/'.encode_base64url($self->{req}{finalize});
 
-	# Handle error
-	unless ($res->is_success) {
-		confess 'POST '.$self->{'new-cert'}.' failed: '.$res->status_line;
+	# Init content
+	my $content = undef;
+
+	# Init res
+	my $res = undef;
+
+	# Load auth request content or post a new one
+	#TODO: add more check on cache file ???
+	if (
+		#XXX: use eval to workaround a fatal in from_json
+		! defined eval {
+			# Check that file exists
+			-f $file &&
+			# Read it
+			($content = read_file($file)) &&
+			# Decode it
+			($content = from_json($content))
+		# Check file modification time ? There is no expires field in json answer
+		} || (str2time($content->{expires}) <= time()+3600)
+	) {
+		# Post certificate request
+		$res = $self->_post($self->{req}{finalize}, {csr => $csr});
+
+		# Handle error
+		unless ($res->is_success) {
+			confess('POST '.$self->{req}{finalize}.' failed: '.$res->status_line);
+		}
+
+		# Extract content
+		$content = from_json($res->content);
+
+		# Check status
+		unless (defined $content->{status} and $content->{status} eq 'valid') {
+			confess('POST '.$self->{req}{finalize}.' failed: invalid status: '.(defined $content->{status}?$content->{status}:'undefined'));
+		}
+
+		# Check certificate
+		unless (defined $content->{certificate} and $content->{certificate}) {
+			confess('POST '.$self->{req}{finalize}.' failed: invalid certificate: '.(defined $content->{certificate}?$content->{certificate}:'undefined'));
+		}
+
+		# Write to file
+		write_file($file, to_json($content));
 	}
 
-	# Open crt file
-	open($fh, '>', $self->{domain}{cert}) or die $!;
+	# Set certificate
+	$self->{req}{certificate} = $content->{certificate};
 
-	# Convert to pem
-	print $fh '-----BEGIN CERTIFICATE-----'."\n".encode_base64($res->content).'-----END CERTIFICATE-----'."\n";
+	# Set file
+	#XXX: tmpdir.'/'.<orderuri>.'/'.<certificateuri>
+	$file = $self->{req}{pending}.'/'.encode_base64url($self->{req}{certificate});
 
-	# Create a request
-	my $req = HTTP::Request->new(GET => ACME_CERT);
+	# Reset content
+	$content = undef;
 
-	# Get request
-	$res = $ua->request($req);
+	# Load auth request content or post a new one
+	#TODO: add more check on cache file ???
+	if (
+		#XXX: use eval to workaround a fatal in from_json
+		! defined eval {
+			# Check that file exists
+			-f $file &&
+			# Read it
+			($content = read_file($file))
+		# Check file modification time ? There is no expires field in json answer
+		#TODO: add a checck on modification time ???
+		}# || (str2time($content->{expires}) <= time()+3600)
+	) {
+		# Post certificate request
+		$res = $self->_post($self->{req}{certificate}, '');
 
-	# Handle error
-	unless ($res->is_success) {
-		carp 'GET '.ACME_CERT.' failed: '.$res->status_line if ($self->{debug});
+		# Handle error
+		unless ($res->is_success) {
+			confess('POST '.$self->{req}{certificate}.' failed: '.$res->status_line);
+		}
+
+		# Set content
+		$content = $res->content;
+
+		# Remove multi-line jump
+		$content =~ s/\n\n/\n/;
+
+		# Remove trailing line jump
+		chomp $content;
+
+		# Write to file
+		write_file($file, $content);
 	}
 
-	# Append content
-	print $fh $res->content;
-
-	# Close file
-	close($fh) or die $!;
+	# Write to cert file
+	write_file($self->{domain}{cert}, $content);
 
 	# Print success
-	carp 'Success, pem certificate in '.$self->{domain}{cert} if ($self->{debug});
+	carp 'Saved '.$self->{domain}{cert}.' pem certificate' if ($self->{verbose});
 }
 
 1;
@@ -744,7 +1106,7 @@ localityName			= Locality Name
 organizationName		= Organization Name
 organizationalUnitName		= Organizational Unit Name
 commonName			= __COMMON_NAME__
-emailAddress			= __EMAIL_ADDRESS__
+__EMAIL_ADDRESS__
 
 [ v3_req ]
 basicConstraints = CA:false
