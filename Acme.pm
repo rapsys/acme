@@ -97,7 +97,7 @@ use constant {
 	ACME_PROD_DIR => 'https://acme-v02.api.letsencrypt.org/directory',
 
 	# Version
-	VERSION => '2.0.0',
+	VERSION => '2.0.2',
 
 	# Timeout
 	TIMEOUT => 300
@@ -1059,15 +1059,18 @@ sub issue {
 		# Set content
 		$content = $res->content;
 
-		# Remove multi-line jump
-		$content =~ s/\n\n/\n/;
-
-		# Remove trailing line jump
-		chomp $content;
-
 		# Write to file
 		write_file($file, $content);
 	}
+
+	# Remove first multi-line jump
+	$content =~ s/\n\n/\n/;
+
+	# Remove ISRG Root X1 certificate signed by DST Root CA X3 present after second multi-line jump
+	$content =~ s/\n\n.*//s;
+
+	# Remove trailing line jump
+	chomp $content;
 
 	# Write to cert file
 	write_file($self->{domain}{cert}, $content);
