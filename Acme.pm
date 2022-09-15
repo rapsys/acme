@@ -66,7 +66,7 @@ use constant {
 	CONFIG => '/etc/acme/config',
 	PENDING => '/tmp/acme',
 	THUMBPRINT => '/etc/acme/thumbprint',
-	TERM => 'https://letsencrypt.org/documents/LE-SA-v1.2-November-15-2017.pdf',
+	TERM => 'https://letsencrypt.org/documents/LE-SA-v1.2-November-15-2017-w-v1.3-notice.pdf',
 	MAIL => 'webmaster',
 
 	# Certificate info
@@ -97,7 +97,7 @@ use constant {
 	ACME_PROD_DIR => 'https://acme-v02.api.letsencrypt.org/directory',
 
 	# Version
-	VERSION => '2.0.2',
+	VERSION => '2.0.3',
 
 	# Timeout
 	TIMEOUT => 300
