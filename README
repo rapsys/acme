@@ -77,14 +77,7 @@
 
 
 
- 07. Donation
- ------------
-
- https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=JNWGK8Z2TBHFN
-
-
-
- 08. Documentation
+ 07. Documentation
  -----------------
 
  A formated and hyperlinked copy of the lastest ACME v2 API documentation can be
@@ -96,14 +89,14 @@
 
 
 
- 09. Author
+ 08. Author
  ----------
 
  Raphaël Gertz (Rapsys) <acme@rapsys.eu>
 
 
 
- 10. Bugs
+ 09. Bugs
  --------
 
  No known bugs.
