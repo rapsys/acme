@@ -1063,11 +1063,14 @@ sub issue {
 		write_file($file, $content);
 	}
 
-	# Remove first multi-line jump
-	$content =~ s/\n\n/\n/;
+	# Write to raw cert file
+	write_file($self->{domain}{cert}.'.raw', $content);
+
+	# Remove multi-line jump
+	$content =~ s/\n\n/\n/s;
 
 	# Remove ISRG Root X1 certificate signed by DST Root CA X3 present after second multi-line jump
-	$content =~ s/\n\n.*//s;
+	#$content =~ s/\n\n.*//s;
 
 	# Remove trailing line jump
 	chomp $content;
