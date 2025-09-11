@@ -61,6 +61,9 @@ use Tie::IxHash;
 #XXX: see javascript implementation https://github.com/diafygi/gethttpsforfree/blob/gh-pages/js/index.js
 #XXX: see https://www.rfc-editor.org/rfc/rfc8555.html
 
+# Bug report links
+#XXX: see https://community.letsencrypt.org/t/shortlived-certificate-stuck-as-processing/241006/14
+
 # Todo list
 #TODO: try to drop retry code in _post, asynch answer may obsolete it
 #TODO: cleanup challenge verification code ?
