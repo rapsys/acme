@@ -32,6 +32,7 @@ our @EXPORT_OK = qw(ACCOUNT CONFIG MAIL PENDING TERM THUMBPRINT VERSION);
 
 # Load dependancies
 use Carp qw(carp confess);
+use Data::Validate::IP qw(is_public_ip is_public_ipv6);
 use Date::Parse qw(str2time);
 use DateTime;
 use Digest::SHA qw(sha256_base64);
@@ -58,6 +59,13 @@ use Tie::IxHash;
 #XXX: see https://letsencrypt.github.io/acme-spec/ (probably based on https://ietf-wg-acme.github.io/acme/)
 #XXX: see jwk rfc http://www.rfc-editor.org/rfc/rfc7517.txt
 #XXX: see javascript implementation https://github.com/diafygi/gethttpsforfree/blob/gh-pages/js/index.js
+#XXX: see https://www.rfc-editor.org/rfc/rfc8555.html
+
+# Todo list
+#TODO: try to drop retry code in _post, asynch answer may obsolete it
+#TODO: cleanup challenge verification code ?
+#TODO: verify that shortlived certificates get renewed in time
+#TODO: try to drop mail address from newAccount, unused by letsencrypt now ?
 
 # Set constants
 use constant {
@@ -66,7 +74,7 @@ use constant {
 	CONFIG => '/etc/acme/config',
 	PENDING => '/tmp/acme',
 	THUMBPRINT => '/etc/acme/thumbprint',
-	TERM => 'https://letsencrypt.org/documents/LE-SA-v1.3-September-21-2022.pdf',
+	TERM => 'https://letsencrypt.org/documents/LE-SA-v1.5-February-24-2025.pdf',
 	MAIL => 'webmaster',
 
 	# Certificate info
@@ -109,6 +117,9 @@ our $ua;
 # Strerr backup
 our $_stderr;
 
+# Retry count
+our $retry;
+
 # JSON Web Key (JWK)
 #XXX: tie to Tie::IxHash to keep a stable ordering of hash keys
 #our %jwk = (
@@ -141,6 +152,9 @@ sub new {
 
 	# Link self to package
 	bless($self, $class);
+
+	# Save retry
+	$self->{retry} = 0;
 
 	# Save verbose
 	$self->{verbose} = $verbose;
@@ -181,35 +195,38 @@ sub new {
 	map {
 		my $tld;
 
-		# Extract tld
-		unless (($tld) = $_ =~ m/\.(\w+)$/) {
-			confess('Extract '.$_.' tld failed');
-		}
-
-		# Check if tld exists
-		unless(Net::Domain::TLD::tld_exists($tld)) {
-			confess('Extracted '.$_.' tld '.$tld.' do not exists');
-		}
-
-		# Search a record
-		my $a = Net::DNS::Resolver->new->search($_, 'A', 'IN');
-
-		# Search aaaa record
-		my $aaaa = Net::DNS::Resolver->new->search($_, 'AAAA', 'IN');
-
-		# Trigger error for unresolvable domain
-		unless (
-			# Check if either has a A or AAAA record
-			scalar map {
-				($_->type eq 'A' or $_->type eq 'AAAA') ? 1 : ();
+		# With non-numeric tld
+		if (!is_public_ip($_)) {
+			# Extract tld
+			unless (($tld) = $_ =~ m/\.(\w+)$/) {
+				confess('Extract '.$_.' tld failed');
 			}
-			# Merge both answer
-			(
-				(defined $a and defined $a->answer) ? $a->answer : (),
-				(defined $aaaa and defined $aaaa->answer) ? $aaaa->answer : ()
-			)
-		) {
-			confess('Resolve '.$_.' to an A or AAAA record failed');
+
+			# Check if tld exists
+			unless(Net::Domain::TLD::tld_exists($tld)) {
+				confess('Extracted '.$_.' tld '.$tld.' do not exists');
+			}
+
+			# Search a record
+			my $a = Net::DNS::Resolver->new->search($_, 'A', 'IN');
+
+			# Search aaaa record
+			my $aaaa = Net::DNS::Resolver->new->search($_, 'AAAA', 'IN');
+
+			# Trigger error for unresolvable domain
+			unless (
+				# Check if either has a A or AAAA record
+				scalar map {
+					($_->type eq 'A' or $_->type eq 'AAAA') ? 1 : ();
+				}
+				# Merge both answer
+				(
+					(defined $a and defined $a->answer) ? $a->answer : (),
+					(defined $aaaa and defined $aaaa->answer) ? $aaaa->answer : ()
+				)
+			) {
+				confess('Resolve '.$_.' to an A or AAAA record failed');
+			}
 		}
 	} @domains;
 
@@ -456,6 +473,26 @@ sub _post {
 		$self->{req}{nonce} = $res->headers->{'replay-nonce'};
 	}
 
+	# Handle error
+	#TODO: see if we may drop retry section with asynch answer which should fix the problem ?
+	#TODO: https://community.letsencrypt.org/t/shortlived-certificate-stuck-as-processing/241006/9
+	unless ($res->is_success and $self->{retry} <= 3) {
+		# Display error
+		confess('POST '.$uri.' failed: '.$res->status_line.':'.$res->content) if ($self->{verbose});
+
+		# Increment retry
+		$self->{retry}++;
+
+		# Sleep
+		sleep(1);
+
+		# Next try
+		$res = $self->_post($uri, $payload);
+	}
+
+	# Reset retry
+	$self->{retry} = 0;
+
 	# Return res object
 	return $res;
 }
@@ -500,8 +537,11 @@ sub _dnsCheck {
 sub _httpCheck {
 	my ($self, $domain, $token) = @_;
 
+	# Set uri
+	my $uri = 'http://'.(is_public_ipv6($domain)?'['.$domain.']':$domain).'/.well-known/acme-challenge/'.$token;
+
 	# Create a request
-	my $req = HTTP::Request->new(GET => 'http://'.$domain.'/.well-known/acme-challenge/'.$token);
+	my $req = HTTP::Request->new(GET => $uri);
 
 	# Check if thumbprint is writeable
 	if (-w $self->{config}{thumbprint}) {
@@ -514,13 +554,13 @@ sub _httpCheck {
 
 	# Handle error
 	unless ($res->is_success) {
-		carp 'Fetch http://'.$domain.'/.well-known/acme-challenge/'.$token.' failed: '.$res->status_line if ($self->{verbose});
+		carp 'Fetch '.$uri.' failed: '.$res->status_line if ($self->{verbose});
 		return;
 	}
 
 	# Handle invalid content
 	unless($res->content =~ /^$token.$self->{account}{thumbprint}\s*$/) {
-		carp 'Fetched http://'.$domain.'/.well-known/acme-challenge/'.$token.' with "'.$res->content.'" instead of "'.$token.'.'.$self->{account}{thumbprint}.'"' if ($self->{verbose});
+		carp 'Fetched '.$uri.' with "'.$res->content.'" instead of "'.$token.'.'.$self->{account}{thumbprint}.'"' if ($self->{verbose});
 		return;
 	}
 
@@ -630,13 +670,24 @@ sub order {
 		#XXX: tie to Tie::IxHash to keep a stable ordering of hash keys
 		#XXX: https://www.perlmonks.org/?node_id=1215976
 		#XXX: optional notBefore, notAfter, see https://ietf-wg-acme.github.io/acme/draft-ietf-acme-acme.html#applying-for-certificate-issuance
-		tie(my %payload, 'Tie::IxHash', identifiers => []);
+		tie(my %payload, 'Tie::IxHash', 'profile' => 'classic', identifiers => []);
 
 		# Loop on domains
 		map {
-			# Tie in a stable hash and append to identifiers array
-			#XXX: tie to Tie::IxHash to keep a stable ordering of hash keys
-			tie(%{$payload{identifiers}[scalar @{$payload{identifiers}}]}, 'Tie::IxHash', type => 'dns', value => $_);
+			# With public ip
+			if (is_public_ip($_)) {
+				# Set shortlived profile
+				$payload{profile} = 'shortlived';
+
+				# Tie in a stable hash and append to identifiers array
+				#XXX: tie to Tie::IxHash to keep a stable ordering of hash keys
+				tie(%{$payload{identifiers}[scalar @{$payload{identifiers}}]}, 'Tie::IxHash', type => 'ip', value => $_);
+			# With fqdn
+			} else {
+				# Tie in a stable hash and append to identifiers array
+				#XXX: tie to Tie::IxHash to keep a stable ordering of hash keys
+				tie(%{$payload{identifiers}[scalar @{$payload{identifiers}}]}, 'Tie::IxHash', type => 'dns', value => $_);
+			}
 		} ($self->{domain}{domain}, @{$self->{domain}{domains}});
 
 		# Post new order request
@@ -660,6 +711,18 @@ sub order {
 		# Extract content
 		$content = from_json($res->content);
 
+		# Check status
+		unless ($content->{status} eq 'ready' or $content->{status} eq 'pending') {
+			confess('POST '.$self->{req}{'newOrder'}.' invalid status: '.$content->{status}.': '.$res->status_line);
+		}
+
+		# Store location
+		# XXX: used with async response
+		$content->{location} = $res->headers->{location};
+
+		# Store retry after
+		$content->{retryafter} = (defined $res->headers->{'retry-after'} and $res->headers->{'retry-after'}) ? $res->headers->{'retry-after'} : 1;
+
 		# Write to file
 		write_file($file, to_json($content));
 	}
@@ -667,11 +730,20 @@ sub order {
 	# Save the authorizations
 	$self->{req}{authorizations} = [ keys %{{ map { $_ => undef } @{$content->{authorizations}} }} ];
 
-	# Save the finalize uri
-	$self->{req}{finalize} = $content->{finalize};
-
 	# Create challenges hash
 	%{$self->{req}{challenges}} = ();
+
+	# Save finalize uri
+	$self->{req}{finalize} = $content->{finalize};
+
+	# Save location
+	$self->{req}{location} = $content->{location};
+
+	# Save retry after
+	$self->{req}{retryafter} = $content->{retryafter};
+
+	# Save status
+	$self->{req}{status} = $content->{status};
 
 	# Extract authorizations
 	map {
@@ -683,7 +755,7 @@ sub order {
 
 		# Init file
 		#XXX: tmpdir.'/'.<orderuri>.'/'.<authuri>
-		my $file = $self->{req}{pending}.'/'.encode_base64url($uri);
+		my $authFile = $self->{req}{pending}.'/'.encode_base64url($uri);
 
 		# Load auth request content or post a new one
 		#TODO: add more check on cache file ???
@@ -691,9 +763,9 @@ sub order {
 			#XXX: use eval to workaround a fatal in from_json
 			! defined eval {
 				# Check that file exists
-				-f $file &&
+				-f $authFile &&
 				# Read it
-				($content = read_file($file)) &&
+				($content = read_file($authFile)) &&
 				# Decode it
 				($content = from_json($content))
 			# Check expiration
@@ -719,7 +791,10 @@ sub order {
 				confess('POST '.$uri.' missing identifier: '.$res->status_line);
 			} else {
 				unless (
-					$content->{identifier}{type} eq 'dns' and
+					(
+						$content->{identifier}{type} eq 'dns' or
+						$content->{identifier}{type} eq 'ip'
+					) and
 					$content->{identifier}{value}
 				) {
 					confess('POST '.$uri.' invalid identifier: '.$res->status_line);
@@ -732,7 +807,7 @@ sub order {
 			}
 
 			# Write to file
-			write_file($file, to_json($content));
+			write_file($authFile, to_json($content));
 		}
 
 		# Add challenge
@@ -780,7 +855,7 @@ sub order {
 						) {
 							# Init file
 							#XXX: tmpdir.'/'.<orderuri>.'/'.<authuri>
-							my $file = $self->{req}{pending}.'/'.encode_base64url($self->{req}{challenges}{$identifier}{challenges}{$_}{url});
+							my $authFile = $self->{req}{pending}.'/'.encode_base64url($self->{req}{challenges}{$identifier}{challenges}{$_}{url});
 
 							# Reset content
 							$content = undef;
@@ -791,9 +866,9 @@ sub order {
 								#XXX: use eval to workaround a fatal in from_json
 								! defined eval {
 									# Check that file exists
-									-f $file &&
+									-f $authFile &&
 									# Read it
-									($content = read_file($file)) &&
+									($content = read_file($authFile)) &&
 									# Decode it
 									($content = from_json($content))
 								#TODO: Check file modification time ? There is no expires field in json answer
@@ -814,7 +889,7 @@ sub order {
 								$content = from_json($res->content);
 
 								# Write to file
-								write_file($file, to_json($content));
+								write_file($authFile, to_json($content));
 							}
 
 							# Save if valid
@@ -862,6 +937,10 @@ sub order {
 
 			# Poll remaining polls
 			map {
+				# Init file
+				#XXX: tmpdir.'/'.<orderuri>.'/'.<authuri>
+				my $authFile = $self->{req}{pending}.'/'.encode_base64url($self->{req}{challenges}{$identifier}{challenges}{$_}{url});
+
 				# Post challenge request
 				#XXX: no cache here we force update
 				my $res = $self->_post(
@@ -877,12 +956,8 @@ sub order {
 				# Extract content
 				$content = from_json($res->content);
 
-				# Init file
-				#XXX: tmpdir.'/'.<orderuri>.'/'.<authuri>
-				my $file = $self->{req}{pending}.'/'.encode_base64url($self->{req}{challenges}{$identifier}{challenges}{$_}{url});
-
 				# Write to file
-				write_file($file, to_json($content));
+				write_file($authFile, to_json($content));
 
 				# Save status
 				if ($content->{status} ne 'pending') {
@@ -891,7 +966,6 @@ sub order {
 			} keys %{$self->{req}{challenges}{$identifier}{polls}};
 		} map { $self->{req}{challenges}{$_}{status} eq 'pending' ? $_ : (); } keys %{$self->{req}{challenges}};
 	} 
-
 
 	# Check if thumbprint is writeable
 	if (-w $self->{config}{thumbprint}) {
@@ -920,6 +994,61 @@ sub order {
 		}
 		exit EXIT_FAILURE;
 	}
+
+	# With pending
+	if ($self->{req}{status} eq 'pending') {
+		# Init max run
+		$remaining = TIMEOUT;
+
+		# Iterate until processing order becomes ready
+		while (--$remaining >= 0 and $self->{req}{status} eq 'pending') {
+			# Sleep
+			sleep($self->{req}{retryafter});
+
+			# Refresh content
+			my $res = $self->_post($self->{req}{location}, '');
+
+			# Handle error
+			unless ($res->is_success) {
+				confess('POST '.$self->{req}{location}.' failed: '.$res->status_line);
+			}
+
+			# Handle error
+			unless ($res->content) {
+				confess('POST '.$self->{req}{location}.' empty content: '.$res->status_line);
+			}
+
+			# Handle error
+			unless ($res->headers->{location}) {
+				confess('POST '.$self->{req}{location}.' missing location: '.$res->status_line);
+			}
+
+			# Extract content
+			$content = from_json($res->content);
+
+			# Check status
+			unless ($content->{status} eq 'ready' or $content->{status} eq 'pending') {
+				confess('POST '.$self->{req}{location}.' invalid status: '.$content->{status}.': '.$res->status_line);
+			}
+
+			# Store location
+			$self->{req}{location} = $res->headers->{location};
+
+			# Store retry after
+			$self->{req}{retryafter} = (defined $res->headers->{'retry-after'} and $res->headers->{'retry-after'}) ? $res->headers->{'retry-after'} : 1;
+
+			# Store status
+			$self->{req}{status} = $content->{status};
+
+			# Write to file
+			write_file($file, to_json($content));
+		}
+
+		# Without ready state
+		unless($self->{req}{status} eq 'ready') {
+			confess('POST '.$self->{req}{location}.' invalid status: '.$self->{req}{status});
+		}
+	}
 }
 
 # Generate certificate request
@@ -939,7 +1068,7 @@ sub genCsr {
 		my $pos = tell DATA;
 
 		# Init counter
-		my $i = 0;
+		my ($i, $j) = (0) x 2;
 
 		# Prepare mail
 		my $mail = join("\n", map { $i++.'.emailAddress'."\t\t\t".'= '.$_; } @{$self->{domain}{mail}});
@@ -950,9 +1079,9 @@ sub genCsr {
 		# Reseek data
 		seek(DATA, $pos, 0);
 
-		# Append domain names
+		# Append domain names and ips
 		$i = 0;
-		map { print $oct 'DNS.'.$i++.' = '.$_."\n"; } ($self->{domain}{domain}, @{$self->{domain}{domains}});
+		map { print $oct (is_public_ip($_)?'IP.'.$j++:'DNS.'.$i++).' = '.$_."\n"; } ($self->{domain}{domain}, @{$self->{domain}{domains}});
 
 		# Generate csr
 		#XXX: read certificate request with: openssl req -inform DER -in $self->{req}{csr} -text
@@ -1012,17 +1141,84 @@ sub issue {
 		$content = from_json($res->content);
 
 		# Check status
-		unless (defined $content->{status} and $content->{status} eq 'valid') {
-			confess('POST '.$self->{req}{finalize}.' failed: invalid status: '.(defined $content->{status}?$content->{status}:'undefined'));
+		unless ($content->{status} eq 'processing' or $content->{status} eq 'valid') {
+			confess('POST '.$self->{req}{location}.' invalid status: '.$content->{status}.': '.$res->status_line);
 		}
 
-		# Check certificate
-		unless (defined $content->{certificate} and $content->{certificate}) {
-			confess('POST '.$self->{req}{finalize}.' failed: invalid certificate: '.(defined $content->{certificate}?$content->{certificate}:'undefined'));
-		}
+		# Store location
+		# XXX: used with async response
+		$content->{location} = $res->headers->{location};
+
+		# Store retry after
+		$content->{retryafter} = (defined $res->headers->{'retry-after'} and $res->headers->{'retry-after'}) ? $res->headers->{'retry-after'} : 1;
 
 		# Write to file
 		write_file($file, to_json($content));
+	}
+
+	# Store location
+	$self->{req}{location} = $content->{location};
+
+	# Store restry after
+	$self->{req}{retryafter} = $content->{retryafter};
+
+	# Store status
+	$self->{req}{status} = $content->{status};
+
+	# With processing
+	if ($self->{req}{status} eq 'processing') {
+		# Init max run
+		my $remaining = TIMEOUT;
+
+		# Iterate until processing order becomes ready
+		while (--$remaining >= 0 and $self->{req}{status} eq 'processing') {
+			# Sleep
+			sleep($self->{req}{retryafter});
+
+			# Refresh content
+			my $res = $self->_post($self->{req}{location}, '');
+
+			# Handle error
+			unless ($res->is_success) {
+				confess('POST '.$self->{req}{location}.' failed: '.$res->status_line);
+			}
+
+			# Handle error
+			unless ($res->content) {
+				confess('POST '.$self->{req}{location}.' empty content: '.$res->status_line);
+			}
+
+			# Handle error
+			unless ($res->headers->{location}) {
+				confess('POST '.$self->{req}{location}.' missing location: '.$res->status_line);
+			}
+
+			# Extract content
+			$content = from_json($res->content);
+
+			# Check status
+			unless ($content->{status} eq 'valid' or $content->{status} eq 'processing') {
+				confess('POST '.$self->{req}{location}.' invalid status: '.$content->{status}.': '.$res->status_line);
+			}
+
+			# Store location
+			# XXX: used with async response
+			$self->{req}{location} = $res->headers->{location};
+
+			# Store retry after
+			$self->{req}{retryafter} = (defined $res->headers->{'retry-after'} and $res->headers->{'retry-after'}) ? $res->headers->{'retry-after'} : 1;
+
+			# Store status
+			$self->{req}{status} = $content->{status};
+
+			# Write to file
+			write_file($file, to_json($content));
+		}
+
+		# Without valid state
+		unless($self->{req}{status} eq 'valid') {
+			confess('POST '.$self->{req}{location}.' invalid status: '.$self->{req}{status});
+		}
 	}
 
 	# Set certificate
@@ -1035,7 +1231,7 @@ sub issue {
 	# Reset content
 	$content = undef;
 
-	# Load auth request content or post a new one
+	# Load certificate request content or post a new one
 	#TODO: add more check on cache file ???
 	if (
 		#XXX: use eval to workaround a fatal in from_json

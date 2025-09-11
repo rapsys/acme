@@ -455,10 +455,14 @@ if (scalar(@domains) < 1) {
 # Deal with each domain
 foreach my $domain (@domains) {
 	# Skip certificate, in cron action, issued within the last 60 days
+	#TODO: XXX: with shortlived certificate this code will not work anymore
+	#TODO: XXX: we need to look certificate real expiration date and not mtime anymore
+	#TODO: XXX: (or store profile somewhere)
 	if ($action eq 'cron' and -f $domain->{cert} and stat($domain->{cert})->mtime >= (time() - 60*24*3600)) {
 		carp('Domain '.$domain->{domain}.' certificate '.$domain->{cert}.' skipped') if ($verbose);
 		next;
 	}
+
 	# Create new object
 	my $acme = Acme->new($verbose, $domain, {thumbprint => $config->{thumbprint}, pending => $config->{pending}, term => $config->{term}});
 
