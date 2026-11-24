@@ -36,7 +36,7 @@ use Carp qw(carp confess);
 use File::Copy qw(copy);
 use File::stat qw(stat);
 use File::Slurp qw(read_file write_file);
-use File::Spec qw(splitpath curdir);
+use File::Spec::Functions qw(splitpath curdir);
 use JSON qw(decode_json);
 use Net::DNS qw();
 use Net::Domain::TLD qw(tld_exists);

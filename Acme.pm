@@ -40,7 +40,7 @@ use Email::Valid;
 use File::Copy qw(copy);
 use File::Path qw(make_path);
 use File::Slurp qw(read_file write_file);
-use File::Spec qw(splitpath);
+use File::Spec::Functions qw(splitpath curdir);
 use File::stat qw(stat);
 use File::Temp; # qw( :seekable );
 use IPC::System::Simple qw(capturex);
