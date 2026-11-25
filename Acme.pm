@@ -108,7 +108,7 @@ use constant {
 	ACME_PROD_DIR => 'https://acme-v02.api.letsencrypt.org/directory',
 
 	# Version
-	VERSION => '3.0.0',
+	VERSION => '3.0.1',
 
 	# Timeout
 	TIMEOUT => 300
